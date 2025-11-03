@@ -1,0 +1,119 @@
+# Watermark Configuration
+# Watermark Embedding Parameters for Secret Watermarking
+
+watermark:
+  # Key derivation (LCG-based)
+  key_scheme: "LCG-v1"
+  key_master: "<private>"        # Master key (set securely)
+  
+  # LCG parameters
+  lcg:
+    a: 6364136223846793005       # LCG multiplier
+    c: 1442695040888963407       # LCG increment
+    m: 18446744073709551616      # 2^64 (LCG modulus)
+    bit_pos: 30                  # Bit position for extraction
+  
+  # Key management
+  key_id: "default_key_001"
+  base_seed: 12345               # Base seed for key derivation
+  experiment_id: "exp_001"
+  
+  # G-field configuration
+  g_field:
+    # NOTE: shape should match model_architecture.yaml -> vae.latent_shape
+    # Reference: configs/model_architecture.yaml
+    shape: [4, 64, 64]           # Latent space shape [C, H, W]
+    mapping_mode: "binary"       # Binary ±1 values (or "continuous")
+    continuous_range: [-1.0, 1.0]  # Range for continuous mode
+    channel_wise: true           # Separate g-field per channel
+    
+  # Hash and content mixing
+  content_hash_strength: 0.3     # Strength of content-based hash
+  time_dependent_offset: true    # Include timestep in hash
+
+# Bias application (watermark injection)
+bias:
+  # Injection mode
+  mode: "non_distortionary"      # or "distortionary"
+  
+  # Alpha schedule (bias strength per timestep)
+  # Early-to-mid timesteps for effective embedding
+  alpha_schedule:
+    type: "adaptive"              # "adaptive" or "fixed"
+    fixed_schedule: [0.0, 0.01, 0.02, 0.02, 0.01, 0.0]  # Example fixed
+    strength_range: [0.005, 0.025]  # [min_strength, max_strength] bias strength range
+    peak_timestep: 0.4           # Peak at 40% of schedule (timestep 40/100)
+    injection_start: 0.8         # Start injection at 80% (timestep 80/100)
+    injection_end: 0.2           # End injection at 20% (timestep 20/100)
+  
+  # Adaptive scaling
+  adaptive_scaling: true         # Scale with noise level
+  # NOTE: min/max strength values come from alpha_schedule.strength_range above
+
+# Spatial masking
+mask:
+  # Mask configuration
+  enabled: true
+  mask_id: "hfreq_1"
+  mask_type: "frequency"         # "frequency" or "spatial"
+  
+  # Frequency mask (non-distortionary)
+  frequency_mask:
+    strength: 0.8                # Mask strength
+    preserve_low_freq: true      # Keep low frequencies
+    cutoff_freq: 0.3             # Frequency cutoff (normalized)
+    
+  # Spatial mask (alternative)
+  spatial_mask:
+    type: "center"               # "center", "edges", or "custom"
+    strength: 0.8
+    center_radius: 0.5           # For center mask
+
+# Injection timesteps (explicit control)
+injection:
+  # Timestep ranges for injection
+  timestep_ranges:
+    - range: [80, 60]            # Early injection (high noise)
+      strength: 0.015
+      weight: 0.3
+    - range: [60, 40]            # Mid injection (medium noise)
+      strength: 0.020
+      weight: 0.5                # Higher weight
+    - range: [40, 20]            # Late injection (low noise)
+      strength: 0.012
+      weight: 0.2
+    - range: [20, 0]             # Final injection
+      strength: 0.008
+      weight: 0.1
+  
+  # Per-timestep g-field generation
+  cache_gfields: true            # Cache G_t tensors
+  cache_device: "cuda"           # Cache on GPU
+
+# Manifest storage
+manifest:
+  # Fields to store in manifest
+  store_fields:
+    - image_path
+    - sample_id
+    - sample_seed
+    - zT_hash
+    - key_id
+    - key_info
+    - alpha_schedule
+    - mask_id
+    - mode
+    - experiment_id
+    - timestamp
+    - g_field_hash
+  
+  # Manifest format
+  format: "jsonl"                # JSON Lines format
+  save_path: "outputs/manifests"
+
+# Reproducibility
+reproducibility:
+  deterministic_keys: true       # Deterministic key generation
+  seed_from_content: true        # Include content in seed
+  timestamp_in_key: false        # Don't include timestamp (for reproducibility)
+

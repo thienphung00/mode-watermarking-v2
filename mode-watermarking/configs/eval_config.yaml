@@ -1,0 +1,97 @@
+# Evaluation Configuration
+# Watermark Detection and Quality Metrics Evaluation
+
+# Detector model to evaluate
+detector:
+  checkpoint_path: "outputs/checkpoints/best_model.ckpt"
+  detector_type: "unet"  # "unet" or "bayesian"
+  device: "cuda"
+  enabled: true  # Enable detector-based evaluation
+  
+# Test data configuration
+test_data:
+  test_split: "data/splits/test.json"
+  batch_size: 16
+  num_workers: 2
+  image_root: null  # Optional root directory for image paths
+
+# Detection parameters (for watermark detection)
+detection:
+  enabled: true  # Enable detection evaluation
+  
+  # Recovery settings
+  recovery:
+    use_vae_encoder: true         # Use VAE encoder for latent recovery
+    num_timesteps: 50             # Number of timesteps to recover
+    method: "direct"              # "direct" (from latent) or "statistical" (sampling)
+    num_samples: 100              # For statistical method: number of samples
+  
+  # Correlation computation
+  correlation:
+    method: "correlation"         # "correlation" or "log_likelihood_ratio"
+    mask_enabled: true            # Apply spatial mask during correlation
+    aggregate_timesteps: "mean"  # "mean", "max", or "weighted"
+    
+  # Calibration and thresholds
+  calibration:
+    target_fpr: 0.01              # Target FPR (1%)
+    significance_level: 0.05      # Statistical significance level
+    compute_auc: true             # Compute AUC-ROC
+    compute_auc_pr: true          # Compute AUC-PR
+    threshold_search_method: "optimal"  # "optimal" or "fixed"
+    fixed_threshold: null         # If threshold_search_method="fixed"
+  
+  # Statistical analysis
+  statistics:
+    compute_confidence_intervals: true
+    confidence_level: 0.95
+    bootstrap_samples: 1000       # For confidence interval estimation
+
+# Quality metrics evaluation
+quality:
+  enabled: true  # Enable quality metrics evaluation
+  metrics:
+    - "psnr"                      # Peak Signal-to-Noise Ratio
+    - "ssim"                      # Structural Similarity Index
+    - "lpips"                     # Learned Perceptual Image Patch Similarity
+    - "fid"                       # Fréchet Inception Distance (batch)
+    - "clip_similarity"           # CLIP similarity score
+  
+  # Metric-specific settings
+  lpips:
+    network: "alex"               # "alex", "vgg", or "squeeze"
+  
+  fid:
+    batch_size: 50                # Batch size for FID computation
+    use_original: true            # Use original images for FID reference
+
+# Mode comparison (non-distortionary vs distortionary)
+mode_comparison:
+  enabled: true
+  modes: ["non_distortionary", "distortionary"]
+  comparison_metrics:
+    - "tpr_at_fpr"
+    - "auc_roc"
+    - "psnr"
+    - "ssim"
+
+# Visualization and output
+visualization:
+  save_dir: "outputs/evaluation"
+  generate_plots: true
+  plots:
+    - "roc_curve"
+    - "pr_curve"
+    - "score_distributions"
+    - "quality_histograms"
+    - "mode_comparison"
+  save_heatmaps: true
+  save_detection_results: true
+  report_format: "markdown"       # "markdown" or "html"
+  
+# Output configuration
+output:
+  save_detection_scores: true
+  save_quality_metrics: true
+  save_aggregate_stats: true
+  output_format: "json"           # "json" or "csv"

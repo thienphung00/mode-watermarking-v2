@@ -1,0 +1,48 @@
+# Diffusion Configuration
+# Optimized for GCP T4 GPU (16GB VRAM) - Noise Prediction & Schedulers
+
+diffusion:
+  # Timestep configuration
+  # NOTE: SD model was trained with 1000 timesteps, but we use fewer for inference
+  trained_timesteps: 1000        # SD was trained with 1000 timesteps
+  inference_timesteps: 50        # DDIM can use fewer steps (50-100) for fast inference
+  prediction_type: "epsilon"     # Predict noise epsilon (standard)
+  
+  # Scheduler configuration
+  # NOTE: SD model is PRETRAINED and FROZEN - we only use inference scheduler
+  scheduler: "DDIM"              # DDIM for deterministic, fast inference
+  scheduler_kwargs:
+    eta: 0.0                     # Deterministic (eta=0 = fully deterministic DDIM)
+    variance_type: "fixed_small"
+  
+  # Why DDIM (not DDPM) for watermark embedding:
+  # - Deterministic (eta=0): Same prompt + key → same watermarked image (reproducible)
+  # - Faster: 50 steps vs DDPM's 1000 steps
+  # - Precise control: Exact timestep control for bias injection
+  # - No randomness: Predictable sampling path for consistent watermark embedding
+  
+  # Noise schedule configuration
+  noise_schedule:
+    type: "linear_decreasing"
+    beta_start: 0.00085            # From LDM tables
+    beta_end: 0.0120               # From LDM tables
+    beta_schedule: "linear"        # Linear interpolation
+    timestep_sampling: "uniform"   # Uniform spacing for DDIM steps
+    clip_sample: true              # Clip samples to valid range
+    clip_sample_range: [-1.0, 1.0]
+
+# Inference settings
+inference:
+  # Number of inference steps (should match diffusion.inference_timesteps)
+  num_inference_steps: 50         # Fast generation
+  
+  # Classifier-free guidance
+  guidance_scale: 7.5            # Standard CFG scale (from SD)
+  # CFG was already trained into SD model (pretrained), this is just for reference
+
+# Memory optimization
+memory:
+  enable_sequential_cpu_offload: false  # Keep on GPU
+  enable_attention_slicing: true        # Slice attention if needed
+  enable_vae_slicing: true              # Slice VAE if needed
+  attention_slice_size: "auto"          # Auto slice size

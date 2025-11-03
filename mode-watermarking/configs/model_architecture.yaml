@@ -1,0 +1,99 @@
+# Model Architecture Configuration
+# Optimized for GCP T4 GPU (16GB VRAM) - Prototyping Phase
+
+# U-Net Architecture (from LDM Table 15, reduced for T4)
+unet:
+  # Base configuration
+  model_channels: 128            # Reduced from 192-320 for T4 (LDM: 128-320)
+  in_channels: 4                 # Latent channels (VAE output)
+  out_channels: 4                # Latent channels
+  num_res_blocks: 2              # ResBlocks per level (from LDM tables)
+  
+  # Channel progression
+  channel_mult: [1, 2, 4]        # Simplified from [1,2,3,4] (LDM: [1,2,3,4])
+  
+  # Attention configuration
+  attention_resolutions: [32, 16]  # Skip 8x8 to save memory (LDM: [32,16,8])
+  num_heads: 4                   # Reduced from 8 for memory (LDM: 8)
+  num_head_channels: 32          # From LDM tables
+  use_scale_shift_norm: true
+  dropout: 0.0                   # No dropout for prototyping
+  
+  # Cross-attention (text conditioning)
+  context_dim: 512               # Text embedding dimension (reduced from 1280)
+  cross_attention_dim: 512       # Cross-attention dimension
+  cross_attention_resolutions: [32, 16]  # Where to apply cross-attention
+  
+  # Resampling
+  resamp_with_conv: true         # Use convolution for up/down sampling
+  use_checkpoint: true           # Gradient checkpointing (save ~40% VRAM)
+  use_linear_in_transformer: false
+  
+  # Memory optimizations
+  use_spatial_transformer: true  # Use cross-attention
+  transformer_depth: 1           # Single transformer block per level
+
+# VAE Configuration
+vae:
+  # Latent space
+  latent_channels: 4             # 4-channel latent
+  latent_shape: [4, 64, 64]      # [C, H, W] - User specified
+  down_factor: 8                 # 512x512 -> 64x64
+  scale_factor: 0.18215          # VAE scaling factor
+  
+  # Architecture
+  in_channels: 3                 # RGB input
+  out_channels: 3                 # RGB output
+  block_out_channels: [128, 128, 256, 256, 512]  # Encoder channels
+  layers_per_block: 2
+  
+  # Memory optimization
+  use_tiling: false              # Tiling for large images (not needed for 512x512)
+  enable_slicing: true           # Enable VAE slicing for memory
+
+# Text Encoder (CLIP)
+text_encoder:
+  # CLIP configuration (reduced for prototyping)
+  vocab_size: 49408              # CLIP vocab size
+  context_length: 77             # CLIP context length
+  width: 512                     # Hidden dimension (reduced from 1280)
+  layers: 12                     # Transformer depth (full CLIP)
+  heads: 8                       # Attention heads
+  output_dim: 512                # Output embedding dim
+  
+  # Memory optimization
+  projection_dim: 512            # Projection dimension
+
+# Attention Processors
+attention:
+  # Attention mechanism
+  processor: "standard"           # Standard multi-head attention
+  enable_flash_attention: false   # Not available on T4
+  enable_xformers: false          # Not available on T4
+  
+  # Attention optimization
+  slice_size: "auto"              # Auto slice if needed
+  enable_attention_slicing: true  # Enable slicing for large resolutions
+
+# Memory Management
+memory_optimization:
+  # Gradient checkpointing
+  gradient_checkpointing: true   # Essential for T4
+  gradient_checkpointing_blocks: "all"  # Checkpoint all blocks
+  
+  # Mixed precision
+  use_fp16: true                 # FP16 for T4
+  use_bf16: false                # Not needed
+  
+  # Channel format
+  channels_last: false           # Standard channel-first (better compatibility)
+  
+  # Compilation
+  torch_compile: false           # Disable for T4 compatibility
+  
+  # CPU offloading (if needed)
+  enable_cpu_offload: false      # Keep on GPU for speed
+
+# Model Size Summary
+# Estimated: ~100M-150M parameters (fits in 12GB VRAM with checkpointing)
+

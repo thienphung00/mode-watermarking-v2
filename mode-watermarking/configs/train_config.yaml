@@ -1,0 +1,88 @@
+# Detector Training Configuration
+# Optimized for GCP T4 GPU (16GB VRAM)
+# Supports both UNet and Bayesian detector training
+
+# UNet Detector Training
+unet_detector:
+  model:
+    name: "unet_detector"
+    input_channels: 4              # Latent space channels
+    base_channels: 64
+    num_classes: 1                  # Binary classification
+  
+  data:
+    train_split: "data/splits/train.json"
+    val_split: "data/splits/val.json"
+    batch_size: 4                  # Reduced from 8 for T4
+    num_workers: 2                 # Reduced from 4 for 15GB RAM
+    
+  training:
+    epochs: 100
+    learning_rate: 0.001
+    gradient_accumulation_steps: 2  # Effective batch = 8
+    optimizer: "adam"
+    scheduler: "cosine"
+    weight_decay: 0.0001
+    mixed_precision: true           # FP16 for T4
+    
+  loss:
+    type: "bce_focal"              # "bce", "focal", "bce_focal"
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    
+  checkpoint:
+    save_dir: "outputs/checkpoints/unet_detector"
+    save_every: 10
+    keep_last_n: 5
+
+# Bayesian Detector Training
+bayesian_detector:
+  # Bayesian detector works with g-values recovered from images
+  # Uses JAX/Flax framework (different from UNet PyTorch)
+  
+  model:
+    name: "bayesian_detector"
+    watermarking_depth: null      # Set based on g-field structure
+    baserate: 0.5                  # Prior probability P(w) that image is watermarked
+    
+  data:
+    # Inputs are g-values, masks, and labels
+    train_g_values: "data/processed/train_g_values.npy"
+    train_masks: "data/processed/train_masks.npy"
+    train_labels: "data/processed/train_labels.npy"
+    val_g_values: "data/processed/val_g_values.npy"
+    val_masks: "data/processed/val_masks.npy"
+    val_labels: "data/processed/val_labels.npy"
+    
+  training:
+    epochs: 50                     # Typical range: 50-250
+    learning_rate: 2.1e-2          # Range: 1e-3 to 2.1e-2
+    minibatch_size: 64            # Batch size for training
+    shuffle: true
+    
+  regularization:
+    l2_weight: 0.0                 # L2 regularization weight
+    l2_weights: [1e-3, 5e-3, 1e-2] # Grid search for best L2
+    
+  validation:
+    metric: "tpr_at_fpr"           # "tpr_at_fpr" or "cross_entropy"
+    test_size: 0.3                 # Train/val split
+    
+  checkpoint:
+    save_dir: "outputs/checkpoints/bayesian_detector"
+    save_every: 10
+    keep_last_n: 3
+
+# Common Training Settings
+common:
+  device: "cuda"
+  seed: 42
+  
+  logging:
+    log_every: 100
+    wandb_project: "mode-watermarking-detectors"
+    tensorboard_dir: "outputs/experiments/detectors"
+    verbose: true
+
+# Note: SD model (U-Net, VAE, text encoder) is PRETRAINED and FROZEN
+# Only detectors are trained, not the base diffusion model
