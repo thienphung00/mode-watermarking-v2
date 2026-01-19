@@ -1,0 +1,34 @@
+# Runtime configuration for watermarking service
+
+# Model configuration
+model:
+  default_model_id: "runwayml/stable-diffusion-v1-5"
+  device: "cuda"  # or "cpu"
+
+# Seed bias configuration (defaults)
+seed_bias:
+  lambda_strength: 0.05
+  domain: "frequency"
+  low_freq_cutoff: 0.05
+  high_freq_cutoff: 0.4
+  detection_mode: "hybrid"
+
+# Detection configuration
+detection:
+  mode: "hybrid"  # "fast_only", "hybrid", "full_inversion"
+  num_inference_steps: 50
+  threshold_high: 0.52
+  threshold_low: 0.48
+
+# Storage
+storage:
+  key_db_path: "service_data/watermark_keys.json"
+
+# Security
+security:
+  encryption_key_env: "WATERMARK_ENCRYPTION_KEY"  # Set in production
+
+# Logging
+logging:
+  level: "INFO"
+

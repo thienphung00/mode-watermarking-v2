@@ -1,0 +1,100 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv/
+
+# OS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Outputs / artifacts
+outputs/
+logs/
+checkpoints/
+wandb/
+
+# Data
+data/
+datasets/
+
+# Models
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+# Include tutorial notebooks but exclude checkpoint files
+!notebooks/*.ipynb
+
+# Data
+data/raw/*
+data/generated/*
+data/coco/annotations/*.json  # Large COCO annotation files (can be regenerated)
+*.jpg
+*.png
+*.jpeg
+*.h5
+*.hdf5
+*.npz
+
+# Outputs
+outputs/
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+
+# Logs
+logs/
+*.log
+wandb/
+tensorboard/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Experiments
+experiments/
+runs/
+results/
+

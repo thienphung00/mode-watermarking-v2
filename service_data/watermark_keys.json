@@ -1,0 +1,11 @@
+{
+  "test_batch_001": {
+    "watermark_id": "test_batch_001",
+    "secret_key_encrypted": "gAAAAABpZbZfxoS_Eby_d2k3hSFN3rkeZdCaMttQlQpuTXR_XU_LDjsSiMP8tmvdETI3er0YSl-12LxTCyXUfPBVxeDlEY0oDg4QpCCDvn1Vl6x8uxRDb1rRD88NzMF0xCGssjtX8apH1HDFrtMS3VuadZ7O-7pGtUQ-fl_CGz99HqhXa_5jzSQ=",
+    "strategy": "seed_bias",
+    "model": "stable-diffusion-v1-5",
+    "config_hash": null,
+    "status": "active",
+    "created_at": "2026-01-13T03:05:03.652189"
+  }
+}
