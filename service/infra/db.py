@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .security import KeyEncryption
+from .logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class WatermarkKeyDB:
@@ -51,7 +54,10 @@ class WatermarkKeyDB:
                 self._db = data
         except Exception as e:
             # If loading fails, start with empty DB
-            print(f"Warning: Failed to load key database: {e}")
+            logger.warning(
+                "db_load_failed",
+                extra={"error": str(e), "path": str(self.storage_path)}
+            )
             self._db = {}
     
     def _save_to_disk(self) -> None:
@@ -64,7 +70,10 @@ class WatermarkKeyDB:
             with open(self.storage_path, "w") as f:
                 json.dump(self._db, f, indent=2)
         except Exception as e:
-            print(f"Warning: Failed to save key database: {e}")
+            logger.warning(
+                "db_save_failed",
+                extra={"error": str(e), "path": str(self.storage_path)}
+            )
     
     def create_watermark(
         self,

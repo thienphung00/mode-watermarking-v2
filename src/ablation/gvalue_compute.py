@@ -15,6 +15,7 @@ from tqdm import tqdm
 from PIL import Image
 
 from ..core.config import AppConfig
+from ..core.key_utils import UNWATERMARKED_DUMMY_KEY
 from ..detection.inversion import DDIMInverter
 from ..detection.g_values import compute_g_values, g_field_config_to_dict
 from .latent_cache import LatentCache
@@ -83,7 +84,7 @@ def compute_g_values_for_family(
         key_id = entry.get("key_id")
         
         # Use dummy key for clean samples
-        computation_key = key_id if key_id is not None else "__unwatermarked_dummy_key__"
+        computation_key = key_id if key_id is not None else UNWATERMARKED_DUMMY_KEY
         
         # Get latent (from cache or compute)
         latent_T = latent_cache.get(image_path, inverter, device=device)

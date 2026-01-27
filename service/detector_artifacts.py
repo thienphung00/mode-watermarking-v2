@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+from service.infra.logging import get_logger
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class DetectorArtifacts:

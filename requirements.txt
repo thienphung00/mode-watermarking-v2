@@ -31,6 +31,19 @@ psutil>=7.1.0
 # Logging and experiment tracking (optional)
 wandb>=0.15.0
 tensorboard>=2.13.0
+structlog>=24.1.0
+
+# Web service
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+httpx>=0.25.0
+pydantic-settings>=2.0.0
+google-cloud-pubsub
+
+
+# Security
+cryptography>=41.0.0
 
 # Data download (optional, for COCO dataset)
 kagglehub>=0.2.0

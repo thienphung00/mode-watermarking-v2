@@ -238,10 +238,7 @@ def generate_training_images(
     # (G-values are computed later by precompute_inverted_g_values.py, not during generation)
     if watermarked_config and isinstance(watermarked_config.watermark, WatermarkedConfig):
         if hasattr(watermarked_config.watermark, 'algorithm_params') and hasattr(watermarked_config.watermark.algorithm_params, 'g_field'):
-            g_field_config_dict = g_field_config_to_dict(
-                watermarked_config.watermark.algorithm_params.g_field,
-                algorithm_params=watermarked_config.watermark.algorithm_params,
-            )
+            g_field_config_dict = g_field_config_to_dict(watermarked_config.watermark.algorithm_params.g_field)
             logger.info(f"G-field config (from watermarked config, for verification): {json.dumps(g_field_config_dict, indent=2)}")
             # Compute hash for reproducibility and matching across generation/precompute/training/detection
             json_str = json.dumps(g_field_config_dict, sort_keys=True)

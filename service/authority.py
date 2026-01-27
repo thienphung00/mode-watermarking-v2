@@ -3,26 +3,37 @@ Watermark Authority Service.
 
 This service is the cryptographic and statistical authority of the system.
 It owns:
-- master_key (never exposed to clients)
+- master_key (never exposed to clients or workers)
 - key_id → watermark policy mapping
 - Embedding configuration
 - Detection configuration (Bayesian parameters)
 - Calibration version
+- Scoped key derivation (workers receive derived keys, never master_key)
 
 All watermark decisions flow from this authority.
+
+CRITICAL SECURITY INVARIANT:
+- master_key NEVER leaves this service
+- Workers receive only derived_key (scoped, non-reversible)
+- Fingerprints are computed here and passed for cache keying
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
 from typing import Any, Dict, Optional
 
 from service.infra.db import get_db
+from service.infra.security import (
+    generate_watermark_id,
+    generate_master_key,
+    compute_key_fingerprint,
+    derive_scoped_key,
+    OperationType,
+)
+from service.infra.logging import get_logger
 
-from service.infra.security import generate_watermark_id, generate_master_key
-
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class WatermarkAuthorityService:
@@ -168,7 +179,10 @@ class WatermarkAuthorityService:
             strategy="seed_bias",
         )
         
-        logger.info(f"Created watermark policy: key_id={key_id}")
+        logger.info(
+            "watermark_policy_created",
+            extra={"key_id": key_id, "watermark_version": watermark_version}
+        )
         
         return {
             "key_id": key_id,
@@ -180,22 +194,35 @@ class WatermarkAuthorityService:
     def get_watermark_payload(
         self,
         key_id: str,
+        request_id: Optional[str] = None,
+        for_local_use: bool = True,
     ) -> Dict[str, Any]:
         """
         Get watermark payload for generation.
         
         This returns the configuration needed by GenerationAdapter to embed
-        the watermark. The master_key is included (but never exposed to clients).
+        the watermark. For remote workers, only derived keys are included.
+        For local use (in-process), master_key can be optionally included.
+        
+        SECURITY INVARIANT:
+        - master_key is NEVER sent to remote workers
+        - derived_key is scoped to this specific operation and key_id
+        - key_fingerprint is used for cache keying and audit trails
         
         Args:
             key_id: Public key identifier
+            request_id: Optional request ID for audit trails
+            for_local_use: If True, include master_key for in-process use.
+                          MUST be False for any remote worker transmission.
         
         Returns:
             Dictionary with:
                 - key_id: Public key identifier
-                - master_key: Master key (for adapter use only)
+                - derived_key: Scoped derived key (for workers)
+                - key_fingerprint: Canonical fingerprint for cache keying
                 - embedding_config: Embedding configuration
                 - watermark_version: Policy version
+                - master_key: (ONLY if for_local_use=True)
         
         Raises:
             ValueError: If key_id not found or revoked
@@ -209,6 +236,17 @@ class WatermarkAuthorityService:
             raise ValueError(f"Watermark {key_id} is revoked")
         
         master_key = record["secret_key"]
+        
+        # Derive scoped key for generation (NEVER send master_key to workers)
+        derived_key = derive_scoped_key(
+            master_key=master_key,
+            key_id=key_id,
+            operation=OperationType.GENERATION,
+            request_id=request_id,
+        )
+        
+        # Compute fingerprint for cache keying
+        key_fingerprint = compute_key_fingerprint(master_key)
         
         # Get policy (for now, use defaults; in future, store in DB)
         # TODO: Store policy in database for versioning
@@ -246,33 +284,57 @@ class WatermarkAuthorityService:
             detection_config,
         )
         
-        return {
+        result = {
             "key_id": key_id,
-            "master_key": master_key,  # Internal use only
+            "derived_key": derived_key,
+            "key_fingerprint": key_fingerprint,
             "embedding_config": embedding_config,
             "watermark_version": watermark_version,
         }
+        
+        # SECURITY: Only include master_key for local use (never for remote workers)
+        if for_local_use:
+            result["master_key"] = master_key
+            logger.debug(
+                "master_key_included_for_local_use",
+                extra={"key_id": key_id, "request_id": request_id}
+            )
+        
+        return result
     
     def get_detection_config(
         self,
         key_id: str,
+        request_id: Optional[str] = None,
+        for_local_use: bool = True,
     ) -> Dict[str, Any]:
         """
         Get detection configuration for detection.
         
         This returns the configuration needed by DetectionService to detect
-        the watermark. The master_key is included (but never exposed to clients).
+        the watermark. For remote workers, only derived keys are included.
+        For local use (in-process), master_key can be optionally included.
+        
+        SECURITY INVARIANT:
+        - master_key is NEVER sent to remote workers
+        - derived_key is scoped to detection operation and key_id
+        - key_fingerprint is used for cache keying and audit trails
         
         Args:
             key_id: Public key identifier
+            request_id: Optional request ID for audit trails
+            for_local_use: If True, include master_key for in-process use.
+                          MUST be False for any remote worker transmission.
         
         Returns:
             Dictionary with:
                 - key_id: Public key identifier
-                - master_key: Master key (for detector use only)
+                - derived_key: Scoped derived key (for workers)
+                - key_fingerprint: Canonical fingerprint for cache keying
                 - detection_config: Detection configuration (Bayesian parameters)
                 - watermark_version: Policy version
                 - g_field_config: G-field configuration (must match generation)
+                - master_key: (ONLY if for_local_use=True)
         
         Raises:
             ValueError: If key_id not found or revoked
@@ -286,6 +348,17 @@ class WatermarkAuthorityService:
             raise ValueError(f"Watermark {key_id} is revoked")
         
         master_key = record["secret_key"]
+        
+        # Derive scoped key for detection (NEVER send master_key to workers)
+        derived_key = derive_scoped_key(
+            master_key=master_key,
+            key_id=key_id,
+            operation=OperationType.DETECTION,
+            request_id=request_id,
+        )
+        
+        # Compute fingerprint for cache keying
+        key_fingerprint = compute_key_fingerprint(master_key)
         
         # Get policy (for now, use defaults; in future, store in DB)
         # TODO: Store policy in database for versioning
@@ -345,9 +418,11 @@ class WatermarkAuthorityService:
         
         # Log resolved paths for debugging
         logger.debug(
-            f"Detection config paths resolved: "
-            f"likelihood_params_path={calibration_path}, "
-            f"mask_path={mask_path}"
+            "detection_config_paths_resolved",
+            extra={
+                "likelihood_params_path": calibration_path,
+                "mask_path": mask_path,
+            }
         )
         
         # Compute deterministic policy version from statistical parameters
@@ -364,14 +439,25 @@ class WatermarkAuthorityService:
             detection_config=detection_config,
         )
         
-        return {
+        result = {
             "key_id": key_id,
-            "master_key": master_key,  # Internal use only
+            "derived_key": derived_key,
+            "key_fingerprint": key_fingerprint,
             "detection_config": detection_config,
             "g_field_config": g_field_config,
             "inversion": inversion_config,
             "watermark_version": watermark_version,
         }
+        
+        # SECURITY: Only include master_key for local use (never for remote workers)
+        if for_local_use:
+            result["master_key"] = master_key
+            logger.debug(
+                "master_key_included_for_local_use",
+                extra={"key_id": key_id, "request_id": request_id}
+            )
+        
+        return result
     
     def revoke_watermark(self, key_id: str) -> bool:
         """

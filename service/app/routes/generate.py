@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import io
-import logging
 
 from fastapi import APIRouter, HTTPException
 
@@ -19,8 +18,9 @@ from service.app.dependencies import (
     get_watermark_authority,
     get_generation_adapter,
 )
+from service.infra.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -57,7 +57,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         if request.key_id:
             # Use existing watermark
             try:
-                watermark_payload = authority.get_watermark_payload(request.key_id)
+                watermark_payload = authority.get_watermark_payload(request.key_id, for_local_use=True)
                 key_id = request.key_id
             except ValueError as e:
                 # Improve error messaging for unknown key_id
@@ -72,10 +72,15 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
             # The newly created key_id is returned in the response.
             policy = authority.create_watermark_policy()
             key_id = policy["key_id"]
-            watermark_payload = authority.get_watermark_payload(key_id)
+            watermark_payload = authority.get_watermark_payload(key_id, for_local_use=True)
         
-        logger.info(f"Generating image with key_id={key_id}")
-        logger.info(f"API received prompt: '{request.prompt}'")
+        logger.info(
+            "generation_started",
+            extra={
+                "key_id": key_id,
+                "prompt_length": len(request.prompt),
+            }
+        )
         
         # VERIFICATION: Seed randomization ensures different images per generation
         # Same key_id + different seeds = different images, but same g-values (deterministic watermark)
@@ -116,28 +121,40 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         final_seed = request.seed
         if final_seed is None:
             final_seed = secrets.randbelow(2**31)  # Random seed in [0, 2^31)
-            logger.info(f"Seed not provided, randomized to: {final_seed}")
+            logger.debug(
+                "seed_randomized",
+                extra={"seed": final_seed, "source": "random"}
+            )
         else:
-            logger.info(f"Using provided seed: {final_seed}")
+            logger.debug(
+                "seed_provided",
+                extra={"seed": final_seed, "source": "request"}
+            )
         
         # Soft check: Log warning if guidance_scale differs from detection requirement
         # Detection inversion requires guidance_scale=1.0
         if final_guidance_scale != 1.0:
             logger.warning(
-                f"Generation using guidance_scale={final_guidance_scale} but detection inversion requires 1.0. "
-                f"API value={final_guidance_scale}, research detection requirement=1.0. "
-                f"Detection will use guidance_scale=1.0 for inversion (required for mathematical correctness)."
+                "guidance_scale_mismatch",
+                extra={
+                    "requested": final_guidance_scale,
+                    "detection_requirement": 1.0,
+                    "hint": "Detection will use guidance_scale=1.0 for inversion",
+                }
             )
         
         # Soft check: Log warning if num_inference_steps differs significantly from common research values
         if final_num_steps not in [25, 50]:
             logger.warning(
-                f"Generation using num_inference_steps={final_num_steps} (API value={final_num_steps}, "
-                f"common research values=25 or 50). Detection must use matching num_inference_steps for accurate inversion."
+                "num_inference_steps_unusual",
+                extra={
+                    "requested": final_num_steps,
+                    "common_values": [25, 50],
+                    "hint": "Detection must use matching num_inference_steps",
+                }
             )
         
         # Step 4: Generate image using adapter
-        logger.info(f"Adapter being called with prompt: '{request.prompt}'")
         result = adapter.generate(
             prompt=request.prompt,
             watermark_payload=watermark_payload,
@@ -147,7 +164,6 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
             height=request.height,
             width=request.width,
         )
-        logger.info(f"Adapter completed generation for prompt: '{request.prompt}'")
         
         # Step 4: Encode image to base64
         image = result["image"]
@@ -169,7 +185,16 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
             width=generation_metadata.get("width"),
         )
         
-        logger.info(f"Generated image successfully: key_id={key_id}")
+        logger.info(
+            "generation_completed",
+            extra={
+                "key_id": key_id,
+                "watermark_version": result["watermark_version"],
+                "seed": final_seed,
+                "num_inference_steps": final_num_steps,
+                "guidance_scale": final_guidance_scale,
+            }
+        )
         
         return GenerateResponse(
             image_base64=image_base64,
@@ -181,6 +206,10 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error generating image: {e}", exc_info=True)
+        logger.error(
+            "generation_failed",
+            extra={"error": str(e)},
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Failed to generate image: {str(e)}")
 

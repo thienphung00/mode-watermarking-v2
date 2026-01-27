@@ -6,7 +6,7 @@ It isolates SD-specific assumptions from the API layer.
 """
 from __future__ import annotations
 
-import logging
+from service.infra.logging import get_logger
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -33,7 +33,7 @@ from src.engine.strategies.seed_bias import SeedBiasStrategy
 
 from .base import GenerationAdapter
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def detect_device() -> str:

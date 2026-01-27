@@ -18,7 +18,7 @@ under controlled, deterministic conditions.
 """
 from __future__ import annotations
 
-import logging
+from service.infra.logging import get_logger
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -36,7 +36,7 @@ from src.engine.pipeline import create_pipeline, generate_with_watermark, prepar
 from src.engine.sampling_utils import get_text_embeddings
 from src.engine.strategies.seed_bias import SeedBiasStrategy
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def detect_device() -> str:

@@ -32,7 +32,14 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from src.core.config import AppConfig, compute_cache_key, WatermarkedConfig
+from src.core.config import AppConfig, WatermarkedConfig
+from src.core.key_utils import (
+    build_latent_cache_key,
+    derive_key_fingerprint,
+    log_key_and_cache_identity,
+    compute_geometry_hash,
+    compute_config_hash,
+)
 from src.engine.pipeline import create_pipeline, generate_with_watermark
 from src.engine.strategy_factory import create_strategy_from_config
 from src.detection.inversion import DDIMInverter
@@ -175,21 +182,30 @@ def compute_g_values_for_image(
     num_inversion_steps: int = 25,
     latent_cache_dir: Optional[Path] = None,
     model_id: Optional[str] = None,
+    allow_cache_rebuild: bool = False,
+    *,
+    key_fingerprint: str,
+    config_key_id: str,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute g-values and mask for a single image.
+    
+    CRITICAL: key_fingerprint and config_key_id are REQUIRED and must be resolved
+    ONCE at startup. This function NEVER derives keys internally.
     
     Args:
         image_path: Path to image
         config: Watermark configuration
         master_key: Master key for PRF
-        key_id: Key identifier (None for clean samples)
+        key_id: Key identifier (None for clean samples, config_key_id for watermarked)
         device: Device to run on
         pipeline: Pre-created diffusion pipeline
         inverter: Pre-created DDIM inverter
         num_inversion_steps: Number of inversion steps
         latent_cache_dir: Optional cache directory for latents
         model_id: Model ID for cache key determinism
+        key_fingerprint: REQUIRED - Runtime key fingerprint (resolved once at startup)
+        config_key_id: REQUIRED - Runtime key_id from config (resolved once at startup)
         
     Returns:
         Tuple of (g_binary, mask) where:
@@ -201,21 +217,27 @@ def compute_g_values_for_image(
     # Load image
     image = Image.open(image_path).convert("RGB")
     
+    # For cache identity we use config_key_id (resolved at startup) for ALL samples,
+    # including clean samples. This ensures consistent cache keys.
+    # The computation key_id can be None for clean samples.
+    key_id_for_cache = config_key_id
+
     # Check cache for latent
     latent_T = None
     cache_hit = False
+    cache_path = None
+    cache_key = None
     if latent_cache_dir is not None:
         image_id = image_path.stem
         
-        # Use comprehensive cache key that includes geometry signature, config, etc.
-        # For latent inversion, we need: image_id, config, num_inversion_steps
-        # CRITICAL: Include master_key and key_id for key isolation
-        cache_key = compute_cache_key(
+        # Use centralized cache key construction (SINGLE SOURCE OF TRUTH)
+        # Always use config_key_id for cache key (not the per-sample key_id)
+        cache_key = build_latent_cache_key(
             image_id=image_id,
             config=config,
             num_inversion_steps=num_inversion_steps,
             master_key=master_key,
-            key_id=key_id,
+            key_id=key_id_for_cache,
         )
         cache_path = latent_cache_dir / f"{cache_key}.pt"
         
@@ -230,50 +252,61 @@ def compute_g_values_for_image(
                     cached_metadata = cached_data.get("metadata", {})
                     
                     # CRITICAL: Verify key fingerprint matches (hard fail on mismatch)
-                    from src.core.config import compute_key_fingerprint
+                    # Use the runtime-resolved key_fingerprint (NEVER recompute here)
                     if isinstance(config.watermark, WatermarkedConfig):
-                        expected_key_fingerprint = compute_key_fingerprint(
-                            master_key,
-                            key_id,
-                            config.watermark.key_settings.prf_config
-                        )
                         cached_key_fingerprint = cached_metadata.get("key_fingerprint")
                         
                         if cached_key_fingerprint is None:
-                            # Old cache format without key fingerprint - invalidate
-                            logger.error(
+                            # Old cache format without key fingerprint
+                            if not allow_cache_rebuild:
+                                raise RuntimeError(
+                                    f"KEY VALIDATION FAILED: Cache entry {cache_path} missing key_fingerprint. "
+                                    f"This cache was created before key isolation fixes. "
+                                    f"Cache must be regenerated. "
+                                    f"To rebuild cache, use --allow-cache-rebuild flag."
+                                )
+                            logger.warning(
                                 f"Cache entry {cache_path} missing key_fingerprint. "
-                                f"This cache was created before key isolation fixes. "
-                                f"Invalidating cache."
+                                f"Invalidating and regenerating (--allow-cache-rebuild enabled)."
                             )
                             latent_T = None
-                        elif cached_key_fingerprint != expected_key_fingerprint:
-                            # Key mismatch - hard fail
-                            raise RuntimeError(
-                                f"KEY MISMATCH: Cached latent was created with different key. "
-                                f"Cached key_fingerprint: {cached_key_fingerprint[:16]}..., "
-                                f"Expected key_fingerprint: {expected_key_fingerprint[:16]}.... "
-                                f"Cache path: {cache_path}. "
-                                f"This artifact cannot be reused with a different key. "
-                                f"Delete the cache or use the correct key."
+                        elif cached_key_fingerprint != key_fingerprint:
+                            # Key mismatch
+                            if not allow_cache_rebuild:
+                                raise RuntimeError(
+                                    f"KEY MISMATCH: Cached latent was created with different key.\n"
+                                    f"  Cached key_fingerprint: {cached_key_fingerprint[:16]}...\n"
+                                    f"  Runtime key_fingerprint: {key_fingerprint[:16]}...\n"
+                                    f"  Cache path: {cache_path}\n"
+                                    f"  Filename fingerprint: {cache_key}\n"
+                                    f"This artifact cannot be reused with a different key.\n"
+                                    f"Delete the cache or use the correct key.\n"
+                                    f"To rebuild cache, use --allow-cache-rebuild flag."
+                                )
+                            logger.warning(
+                                f"Key mismatch detected. Invalidating cache and regenerating "
+                                f"(--allow-cache-rebuild enabled)."
                             )
+                            latent_T = None
                     
                     # VALIDATION: Check metadata matches current request
-                    expected_metadata = {
-                        "image_id": image_id,
-                        "num_inversion_steps": num_inversion_steps,
-                        "model_id": config.diffusion.model_id,
-                    }
-                    
-                    for key, expected_value in expected_metadata.items():
-                        if key in cached_metadata and cached_metadata[key] != expected_value:
-                            logger.warning(
-                                f"Cache metadata mismatch for {key}: "
-                                f"cached={cached_metadata.get(key)}, expected={expected_value}. "
-                                f"Invalidating cache."
-                            )
-                            latent_T = None
-                            break
+                    if latent_T is not None:
+                        image_id = image_path.stem
+                        expected_metadata = {
+                            "image_id": image_id,
+                            "num_inversion_steps": num_inversion_steps,
+                            "model_id": config.diffusion.model_id,
+                        }
+                        
+                        for key, expected_value in expected_metadata.items():
+                            if key in cached_metadata and cached_metadata[key] != expected_value:
+                                logger.warning(
+                                    f"Cache metadata mismatch for {key}: "
+                                    f"cached={cached_metadata.get(key)}, expected={expected_value}. "
+                                    f"Invalidating cache."
+                                )
+                                latent_T = None
+                                break
                 else:
                     # Old format: just tensor - invalidate (no key fingerprint)
                     logger.error(
@@ -290,13 +323,16 @@ def compute_g_values_for_image(
                     else:
                         logger.warning(f"Invalid cache shape {latent_T.shape}, recomputing")
                         latent_T = None
+            except RuntimeError:
+                # Fail fast on key validation / mismatch (never downgrade to warning + recompute)
+                raise
             except Exception as e:
                 logger.warning(f"Failed to load cached latent {cache_path}: {e}")
                 latent_T = None
     
     # Invert to zT if not cached
     if latent_T is None:
-        if latent_cache_dir is not None and not cache_hit:
+        if latent_cache_dir is not None and not cache_hit and cache_path is not None:
             logger.debug(f"Cache miss: {cache_path}")
         latent_T = inverter.invert(
             image,
@@ -306,21 +342,14 @@ def compute_g_values_for_image(
         )  # [1, 4, 64, 64]
         
         # Save to cache with metadata
-        if latent_cache_dir is not None:
+        if latent_cache_dir is not None and cache_path is not None:
             latent_cache_dir.mkdir(parents=True, exist_ok=True)
             try:
                 # Save with metadata for validation
                 image_id = image_path.stem
                 
-                # CRITICAL: Store key fingerprint in metadata
-                from src.core.config import compute_key_fingerprint
-                key_fingerprint = None
-                if isinstance(config.watermark, WatermarkedConfig):
-                    key_fingerprint = compute_key_fingerprint(
-                        master_key,
-                        key_id,
-                        config.watermark.key_settings.prf_config
-                    )
+                # Use runtime-resolved key_fingerprint (NEVER recompute here)
+                stored_key_fingerprint = key_fingerprint if isinstance(config.watermark, WatermarkedConfig) else None
                 
                 cache_data = {
                     "latent": latent_T,
@@ -329,8 +358,8 @@ def compute_g_values_for_image(
                         "num_inversion_steps": num_inversion_steps,
                         "model_id": config.diffusion.model_id,
                         "cache_key": cache_key,
-                        "key_fingerprint": key_fingerprint,
-                        "key_id": key_id,
+                        "key_fingerprint": stored_key_fingerprint,
+                        "key_id": config_key_id,
                         "prf_algorithm": config.watermark.key_settings.prf_config.algorithm if isinstance(config.watermark, WatermarkedConfig) else None,
                     }
                 }
@@ -385,6 +414,8 @@ def export_family_g_dataset(
     cache_dir: Path,
     output_dir: Path,
     num_inversion_steps: int = 25,
+    allow_cache_rebuild: bool = False,
+    dry_run: bool = False,
 ) -> None:
     """
     Export g-dataset for a single family.
@@ -408,17 +439,89 @@ def export_family_g_dataset(
     config = AppConfig.from_yaml(str(config_path))
     config_name = config_path.stem
     
+    # ============================================================================
+    # CANONICAL RUNTIME KEY RESOLUTION (EXACTLY ONCE)
+    # ============================================================================
+    # This is the SINGLE SOURCE OF TRUTH for key identity in this process.
+    # - key_fingerprint: computed exactly ONCE here, passed everywhere, NEVER recomputed
+    # - config_key_id: resolved exactly ONCE here, NEVER overridden by manifest
+    # ============================================================================
+    
+    key_fingerprint: str = ""
+    config_key_id: Optional[str] = None
+    prf_config = None
+    
+    if isinstance(config.watermark, WatermarkedConfig):
+        config_key_id = config.watermark.key_settings.key_id
+        prf_config = config.watermark.key_settings.prf_config
+        
+        # Assertions to ensure required values are present
+        assert master_key is not None, "master_key must be set"
+        assert config_key_id is not None, "key_id must be set in config"
+        assert prf_config is not None, "prf_config must be set in config"
+        
+        # Compute fingerprint EXACTLY ONCE
+        key_fingerprint = derive_key_fingerprint(
+            master_key=master_key,
+            key_id=config_key_id,
+            prf_config=prf_config,
+        )
+        
+        logger.info(
+            f"[KEY] Resolved runtime key\n"
+            f"  key_id           = {config_key_id}\n"
+            f"  fingerprint[:16] = {key_fingerprint[:16]}\n"
+            f"  prf_algorithm    = {prf_config.algorithm}\n"
+            f"  prf_output_bits  = {prf_config.output_bits}"
+        )
+    else:
+        logger.info("[KEY] Unwatermarked mode - no key resolution needed")
+    
+    # Log key and cache identity at startup
+    config_cache_dir = cache_dir / config_name
+    latent_cache_dir = config_cache_dir / "latents"
+    log_key_and_cache_identity(
+        master_key=master_key,
+        key_id=config_key_id,
+        config=config,
+        cache_root=cache_dir,
+        cache_namespace=config_name,
+        num_inversion_steps=num_inversion_steps,
+    )
+
+    # CRITICAL: Enforce fingerprint consistency from cache filename before any per-image load.
+    # Cache keys are formatted like: key<hex16>_geom..._cfg..._..._img<id>.pt
+    if latent_cache_dir.exists() and key_fingerprint is not None:
+        runtime_fp16 = key_fingerprint[:16]
+        parsed_fp16 = None
+        for cache_file in latent_cache_dir.glob("*.pt"):
+            stem = cache_file.stem
+            first_component = stem.split("_", 1)[0]
+            if first_component.startswith("key") and len(first_component) == 3 + 16:
+                parsed_fp16 = first_component[3:]
+                break
+        if parsed_fp16 is not None and parsed_fp16 != runtime_fp16:
+            raise RuntimeError(
+                "Cache fingerprint mismatch detected at startup.\n"
+                f"  Cache fingerprint (from filename): {parsed_fp16}\n"
+                f"  Runtime fingerprint (from config): {runtime_fp16}\n"
+                f"  Cache directory: {latent_cache_dir}\n"
+                "This indicates the cache was created with a different key.\n"
+                "Use the correct master_key/key_id/prf_config (or delete the cache)."
+            )
+    
+    # Dry-run mode: just validate and exit
+    if dry_run:
+        logger.info("[DRY RUN] Key and cache identity validated. Exiting.")
+        return
+    
     # Load family signature
     signature_path = family_dir / "signature.json"
     with open(signature_path, "r") as f:
         signature = json.load(f)
     
     # Create cache directory for this config
-    config_cache_dir = cache_dir / config_name
     config_cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Latent cache directory
-    latent_cache_dir = config_cache_dir / "latents"
     
     # Check if dataset exists
     manifest_path = config_cache_dir / "manifest.json"
@@ -431,13 +534,12 @@ def export_family_g_dataset(
     else:
         logger.info(f"Generating dataset: {config_cache_dir}")
         # Generate dataset
-        key_id = config.watermark.key_settings.key_id
         watermarked_manifest, clean_manifest = generate_dataset(
             config=config,
             prompts=prompts,
             output_dir=config_cache_dir,
             num_samples=num_samples,
-            key_id=key_id,
+            key_id=config_key_id,
             device=device,
         )
         
@@ -460,19 +562,35 @@ def export_family_g_dataset(
     
     for entry in tqdm(watermarked_manifest, desc="Watermarked"):
         image_path = config_cache_dir / entry["image_path"]
-        key_id = entry["key_id"]
+        
+        # VALIDATION ONLY: Check manifest key_id matches runtime key_id
+        # We NEVER consume manifest key_id as authority - config_key_id is authoritative
+        entry_key_id = entry.get("key_id")
+        if config_key_id is not None and entry_key_id is not None and str(entry_key_id) != str(config_key_id):
+            raise RuntimeError(
+                "Manifest/config key_id mismatch.\n"
+                f"  manifest key_id: {entry_key_id}\n"
+                f"  config key_id (runtime): {config_key_id}\n"
+                f"  manifest: {manifest_path}\n"
+                f"  family: {family_id}\n"
+                "This indicates config drift or a key propagation bug.\n"
+                "The manifest was generated with a different key than the current config."
+            )
         
         g_binary, mask_valid = compute_g_values_for_image(
             image_path=image_path,
             config=config,
             master_key=master_key,
-            key_id=key_id,
+            key_id=config_key_id,  # Use runtime config key_id (not manifest entry)
             device=device,
             pipeline=pipeline,
             inverter=inverter,
             num_inversion_steps=num_inversion_steps,
             latent_cache_dir=latent_cache_dir,
             model_id=config.diffusion.model_id,
+            allow_cache_rebuild=allow_cache_rebuild,
+            key_fingerprint=key_fingerprint,  # REQUIRED: runtime-resolved fingerprint
+            config_key_id=config_key_id,      # REQUIRED: runtime-resolved key_id
         )
         
         g_wm_list.append(g_binary.cpu().numpy())
@@ -489,13 +607,16 @@ def export_family_g_dataset(
             image_path=image_path,
             config=config,
             master_key=master_key,
-            key_id=None,
+            key_id=None,  # Clean samples have no key_id for computation
             device=device,
             pipeline=pipeline,
             inverter=inverter,
             num_inversion_steps=num_inversion_steps,
             latent_cache_dir=latent_cache_dir,
             model_id=config.diffusion.model_id,
+            allow_cache_rebuild=allow_cache_rebuild,
+            key_fingerprint=key_fingerprint,  # REQUIRED: runtime-resolved fingerprint
+            config_key_id=config_key_id,      # REQUIRED: runtime-resolved key_id (for cache consistency)
         )
         
         g_clean_list.append(g_binary.cpu().numpy())
@@ -526,19 +647,14 @@ def export_family_g_dataset(
     np.save(family_output_dir / "g_clean.npy", g_clean)
     np.save(family_output_dir / "mask.npy", mask)
     
-    # CRITICAL: Compute and store key fingerprint
-    from src.core.config import compute_key_fingerprint
-    key_fingerprint = None
-    key_id = None
+    # CRITICAL: Compute and store key fingerprint (already computed above)
     prf_algorithm = None
     if isinstance(config.watermark, WatermarkedConfig):
-        key_id = config.watermark.key_settings.key_id
         prf_algorithm = config.watermark.key_settings.prf_config.algorithm
-        key_fingerprint = compute_key_fingerprint(
-            master_key,
-            key_id,
-            config.watermark.key_settings.prf_config
-        )
+    
+    # Compute hashes for manifest
+    geometry_hash = compute_geometry_hash(config)
+    config_hash = compute_config_hash(config)
     
     # Save metadata
     meta = {
@@ -549,13 +665,36 @@ def export_family_g_dataset(
         "signature": signature,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "key_fingerprint": key_fingerprint,
-        "key_id": key_id,
+        "key_id": config_key_id,
         "prf_algorithm": prf_algorithm,
+        "geometry_hash": geometry_hash,
+        "config_hash": config_hash,
     }
     
     meta_path = family_output_dir / "meta.json"
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
+    
+    # CRITICAL: Write latent manifest for downstream stages
+    latent_manifest_path = config_cache_dir / "latent_manifest.json"
+    latent_manifest = {
+        "master_key_fingerprint": key_fingerprint,
+        "key_id": config_key_id,
+        "cache_dir": str(latent_cache_dir),
+        "num_samples": num_samples,
+        "config_hash": config_hash,
+        "geometry_hash": geometry_hash,
+        "num_inversion_steps": num_inversion_steps,
+        "model_id": config.diffusion.model_id,
+        "guidance_scale": config.diffusion.guidance_scale,
+        "inference_steps": config.diffusion.inference_timesteps,
+        "prf_algorithm": prf_algorithm,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "script": "run_ablation_g_export",
+    }
+    with open(latent_manifest_path, "w") as f:
+        json.dump(latent_manifest, f, indent=2)
+    logger.info(f"✓ Wrote latent manifest: {latent_manifest_path}")
     
     logger.info(f"✓ Exported g-dataset for {family_id}:")
     logger.info(f"    g_wm: {g_wm.shape}")
@@ -634,6 +773,16 @@ Examples:
         default=Path("experiments/watermark_ablation/configs"),
         help="Directory containing config YAML files (for resolving relative paths)",
     )
+    parser.add_argument(
+        "--allow-cache-rebuild",
+        action="store_true",
+        help="Allow cache rebuild on key mismatch (default: fail-fast)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry-run mode: validate key and cache identity, then exit",
+    )
     
     args = parser.parse_args()
     
@@ -693,6 +842,8 @@ Examples:
                 cache_dir=args.cache_dir,
                 output_dir=args.output_dir,
                 num_inversion_steps=args.num_inversion_steps,
+                allow_cache_rebuild=args.allow_cache_rebuild,
+                dry_run=args.dry_run,
             )
         except Exception as e:
             logger.error(f"✗ Failed to process {family_id}: {e}", exc_info=True)

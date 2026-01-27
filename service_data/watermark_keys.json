@@ -1,11 +1,31 @@
 {
-  "test_batch_001": {
-    "watermark_id": "test_batch_001",
+  "ablation_baseline_binary_bandpass_mid": {
+    "watermark_id": "ablation_baseline_binary_bandpass_mid",
     "secret_key_encrypted": "gAAAAABpZbZfxoS_Eby_d2k3hSFN3rkeZdCaMttQlQpuTXR_XU_LDjsSiMP8tmvdETI3er0YSl-12LxTCyXUfPBVxeDlEY0oDg4QpCCDvn1Vl6x8uxRDb1rRD88NzMF0xCGssjtX8apH1HDFrtMS3VuadZ7O-7pGtUQ-fl_CGz99HqhXa_5jzSQ=",
+    "key_fingerprint": "f799eedcce10a409450822a2758fb4301a10d9523a63e7a6351ecf3c3eb2fe84",
     "strategy": "seed_bias",
     "model": "stable-diffusion-v1-5",
+    "prf_algorithm": "chacha20",
     "config_hash": null,
+    "g_field_config": {
+      "channel_wise": true,
+      "continuous_range": [-1.0, 1.0],
+      "domain": "frequency",
+      "frequency_mode": "bandpass",
+      "frequency_normalization": "parseval",
+      "high_freq_cutoff": 0.4,
+      "low_freq_cutoff": 0.05,
+      "mapping_mode": "binary",
+      "normalize_zero_mean": true,
+      "normalize_unit_variance": true
+    },
+    "calibration": {
+      "family_file": "experiments/watermark_ablation/family_043.json",
+      "num_positions": 1940,
+      "latent_type": "zT",
+      "num_inversion_steps": null
+    },
     "status": "active",
-    "created_at": "2026-01-13T03:05:03.652189"
+    "created_at": "2026-01-22T00:00:00.000000"
   }
 }

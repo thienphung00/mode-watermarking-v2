@@ -60,6 +60,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "flake8>=6.0.0",
@@ -105,4 +106,8 @@ addopts = [
     "--strict-markers",
     "--tb=short",
 ]
+markers = [
+    "asyncio: mark test as async",
+]
+asyncio_mode = "auto"
 

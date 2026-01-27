@@ -5,31 +5,66 @@ Provides dependency injection for:
 - WatermarkAuthorityService
 - GenerationAdapter (Phase-1: Stable Diffusion only)
 - DetectionService (Bayesian-only)
+- InferenceClient (local or remote)
+
+Architecture:
+- AppState holds all service instances
+- Services are initialized in lifespan context manager
+- Dependencies use request.app.state for access
+- No global mutable state
+
+DEPENDENCY PURITY RULES:
+Dependencies (functions called by FastAPI `Depends()`) must be pure:
+
+✅ ALLOWED in dependencies:
+- Object retrieval from app state
+- Lightweight validation
+- In-memory access
+
+❌ FORBIDDEN in dependencies:
+- Network calls
+- Database queries
+- Secret fetching
+- Health checks
+- Locks (except for lightweight state access)
+- Retries
+
+Heavy initialization MUST be done in:
+- Application startup lifecycle (lifespan)
+- Background tasks
+- Explicit service calls
 
 No research-layer instantiation here.
 No SD-specific logic here.
 """
 from __future__ import annotations
 
-import logging
-from typing import Optional
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, TYPE_CHECKING, Any
 
 import torch
-from diffusers import StableDiffusionPipeline
+from fastapi import Request, Depends
 
-import sys
-from pathlib import Path
+if TYPE_CHECKING:
+    from diffusers import StableDiffusionPipeline
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from service.authority import WatermarkAuthorityService
-from service.generation import GenerationAdapter, StableDiffusionSeedBiasAdapter
-from service.detection import DetectionService
 from service.app.artifact_resolver import get_artifact_resolver
+from service.infra.logging import get_logger
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from diffusers import StableDiffusionPipeline
+    from service.generation import GenerationAdapter, StableDiffusionSeedBiasAdapter
+    from service.detection import DetectionService
+    from service.inference.client import InferenceClient
+
+logger = get_logger(__name__)
 
 
 def detect_device() -> str:
@@ -47,17 +82,141 @@ def detect_device() -> str:
         return "cpu"
 
 
-# Global service caches
+@dataclass
+class AppState:
+    """
+    Application state holding all service instances.
+    
+    Initialized during FastAPI lifespan startup.
+    Accessed via request.app.state.services.
+    """
+    authority: Optional[WatermarkAuthorityService] = None
+    generation_adapter: Optional["GenerationAdapter"] = None
+    detection_service: Optional["DetectionService"] = None
+    pipeline: Optional["StableDiffusionPipeline"] = None
+    inference_client: Optional["InferenceClient"] = None
+    
+    # State flags
+    pipeline_initialized: bool = False
+    is_ready: bool = False
+    
+    # Configuration
+    device: str = field(default_factory=detect_device)
+    model_id: str = "runwayml/stable-diffusion-v1-5"
+
+
+# =============================================================================
+# Legacy global state (for backward compatibility during migration)
+# TODO: Remove after all routes are migrated to use request.app.state
+# =============================================================================
 _authority_service: Optional[WatermarkAuthorityService] = None
 _generation_adapter: Optional[GenerationAdapter] = None
-_pipeline_cache: Optional[StableDiffusionPipeline] = None
-_pipeline_initialized: bool = False  # Track if pipeline was preloaded at startup
-_detection_service: Optional[DetectionService] = None
+_pipeline_cache: Optional["StableDiffusionPipeline"] = None
+_pipeline_initialized: bool = False
+_detection_service: Optional["DetectionService"] = None
 
+
+# =============================================================================
+# New dependency functions using request.app.state (preferred)
+# =============================================================================
+
+def get_app_state(request: Request) -> AppState:
+    """
+    Get application state from request.
+    
+    Args:
+        request: FastAPI request object
+    
+    Returns:
+        AppState instance
+    """
+    return request.app.state.services
+
+
+def get_authority(request: Request) -> WatermarkAuthorityService:
+    """
+    Get WatermarkAuthorityService from app state.
+    
+    Args:
+        request: FastAPI request object
+    
+    Returns:
+        WatermarkAuthorityService instance
+    
+    Raises:
+        RuntimeError: If authority not initialized
+    """
+    state = get_app_state(request)
+    if state.authority is None:
+        raise RuntimeError("WatermarkAuthorityService not initialized")
+    return state.authority
+
+
+def get_adapter(request: Request) -> "GenerationAdapter":
+    """
+    Get GenerationAdapter from app state.
+    
+    Args:
+        request: FastAPI request object
+    
+    Returns:
+        GenerationAdapter instance
+    
+    Raises:
+        RuntimeError: If adapter not initialized
+    """
+    state = get_app_state(request)
+    if state.generation_adapter is None:
+        raise RuntimeError("GenerationAdapter not initialized")
+    return state.generation_adapter
+
+
+def get_detector(request: Request) -> "DetectionService":
+    """
+    Get DetectionService from app state.
+    
+    Args:
+        request: FastAPI request object
+    
+    Returns:
+        DetectionService instance
+    
+    Raises:
+        RuntimeError: If detection service not initialized
+    """
+    state = get_app_state(request)
+    if state.detection_service is None:
+        raise RuntimeError("DetectionService not initialized")
+    return state.detection_service
+
+
+# =============================================================================
+# Legacy singleton functions (for backward compatibility)
+# 
+# WARNING: These functions violate DEPENDENCY PURITY rules.
+# They may perform lazy initialization (I/O) on first call.
+# 
+# Use ONLY:
+# - In startup lifecycle (lifespan context manager)
+# - In explicit service calls (not FastAPI `Depends()`)
+# 
+# For FastAPI dependencies, use:
+# - get_authority(request) 
+# - get_adapter(request)
+# - get_detector(request)
+# =============================================================================
 
 def get_watermark_authority() -> WatermarkAuthorityService:
     """
-    Get WatermarkAuthorityService singleton.
+    Get WatermarkAuthorityService singleton (legacy).
+    
+    WARNING: This function may perform lazy initialization.
+    DO NOT use as a FastAPI dependency.
+    Prefer using get_authority(request) with dependency injection.
+    
+    Acceptable uses:
+    - Startup lifecycle (lifespan)
+    - Background tasks
     
     Returns:
         WatermarkAuthorityService instance
@@ -66,7 +225,10 @@ def get_watermark_authority() -> WatermarkAuthorityService:
     
     if _authority_service is None:
         _authority_service = WatermarkAuthorityService()
-        logger.info("WatermarkAuthorityService initialized")
+        logger.info(
+            "authority_initialized",
+            extra={"method": "legacy_singleton"}
+        )
     
     return _authority_service
 
@@ -91,16 +253,23 @@ def preload_pipeline(model_id: str = "runwayml/stable-diffusion-v1-5", device: O
     if _pipeline_initialized:
         if _pipeline_cache is None:
             raise RuntimeError("Pipeline initialization state is inconsistent")
-        logger.warning("Pipeline already preloaded, skipping")
+        logger.warning(
+            "pipeline_already_preloaded",
+            extra={"action": "skipping"}
+        )
         return
     
     if device is None:
         device = detect_device()
     
-    logger.info(f"Preloading Stable Diffusion pipeline: {model_id} on {device}")
+    logger.info(
+        "pipeline_preloading",
+        extra={"model_id": model_id, "device": device}
+    )
     
     # Load pipeline without dtype (dtype will be set via .to(device))
     # This avoids passing dtype to constructor which causes warnings
+    from diffusers import StableDiffusionPipeline
     _pipeline_cache = StableDiffusionPipeline.from_pretrained(model_id)
     
     # Move to device and set appropriate dtype
@@ -111,10 +280,13 @@ def preload_pipeline(model_id: str = "runwayml/stable-diffusion-v1-5", device: O
         _pipeline_cache = _pipeline_cache.to(device, dtype=torch.float32)
     
     _pipeline_initialized = True
-    logger.info("Pipeline preloaded successfully at startup")
+    logger.info(
+        "pipeline_preloaded",
+        extra={"model_id": model_id, "device": device, "status": "success"}
+    )
 
 
-def get_pipeline(model_id: str = "runwayml/stable-diffusion-v1-5", device: Optional[str] = None) -> StableDiffusionPipeline:
+def get_pipeline(model_id: str = "runwayml/stable-diffusion-v1-5", device: Optional[str] = None) -> "StableDiffusionPipeline":
     """
     Get preloaded Stable Diffusion pipeline (singleton).
     
@@ -145,16 +317,21 @@ def get_pipeline(model_id: str = "runwayml/stable-diffusion-v1-5", device: Optio
     # Validate model_id matches (optional check, but helpful for debugging)
     if model_id != "runwayml/stable-diffusion-v1-5":
         logger.warning(
-            f"Requested model_id={model_id} but preloaded model is "
-            f"runwayml/stable-diffusion-v1-5. Returning preloaded pipeline."
+            "pipeline_model_mismatch",
+            extra={
+                "requested": model_id,
+                "preloaded": "runwayml/stable-diffusion-v1-5",
+            }
         )
     
     return _pipeline_cache
 
 
-def get_generation_adapter() -> GenerationAdapter:
+def get_generation_adapter() -> "GenerationAdapter":
     """
     Get GenerationAdapter singleton (Phase-1: Stable Diffusion only).
+    
+    NOTE: Prefer using get_adapter(request) with dependency injection.
     
     TODO (Phase-2): This adapter can be removed when moving to client-side generation.
     The API will only issue watermark credentials, not perform generation.
@@ -166,21 +343,26 @@ def get_generation_adapter() -> GenerationAdapter:
     
     if _generation_adapter is None:
         # Phase-1: Stable Diffusion only
+        from service.generation import StableDiffusionSeedBiasAdapter
         _generation_adapter = StableDiffusionSeedBiasAdapter(
             model_id="runwayml/stable-diffusion-v1-5",
             device=None,  # Auto-detect
             use_fp16=True,
         )
-        logger.info("GenerationAdapter initialized (Stable Diffusion)")
+        logger.info(
+            "generation_adapter_initialized",
+            extra={"type": "StableDiffusionSeedBiasAdapter", "method": "legacy_singleton"}
+        )
     
     return _generation_adapter
 
 
-def get_detection_service() -> DetectionService:
+def get_detection_service() -> "DetectionService":
     """
     Get DetectionService singleton (Bayesian-only).
     
-    ⚠️ DETECTION LAYER ⚠️
+    NOTE: Prefer using get_detector(request) with dependency injection.
+    
     Detection uses detector_type="bayesian" only.
     Legacy detection modes (fast_only/hybrid/full_inversion) are deprecated.
     
@@ -203,13 +385,17 @@ def get_detection_service() -> DetectionService:
                 f"Detection service cannot be initialized without valid artifacts."
             )
         
+        from service.detection import DetectionService
         authority = get_watermark_authority()
         pipeline = get_pipeline()
         _detection_service = DetectionService(
             authority=authority,
             pipeline=pipeline,
         )
-        # Logging happens in DetectionService.__init__
+        logger.info(
+            "detection_service_initialized",
+            extra={"method": "legacy_singleton"}
+        )
     
     return _detection_service
 
@@ -236,3 +422,99 @@ def get_detection_availability_status() -> dict:
     resolver = get_artifact_resolver()
     return resolver.get_availability_status()
 
+
+# =============================================================================
+# Initialization functions for lifespan management
+# =============================================================================
+
+async def initialize_app_state(app_state: AppState) -> None:
+    """
+    Initialize all services in app state.
+    
+    Called during FastAPI lifespan startup.
+    
+    Args:
+        app_state: AppState instance to initialize
+    """
+    logger.info("app_state_initializing")
+    
+    # Initialize authority
+    app_state.authority = WatermarkAuthorityService()
+    logger.info("authority_initialized", extra={"method": "app_state"})
+    
+    # Preload pipeline (if not in remote inference mode)
+    # In remote mode, pipeline is loaded on GPU workers
+    inference_mode = "local"  # TODO: Get from settings
+    
+    if inference_mode == "local":
+        device = app_state.device
+        model_id = app_state.model_id
+        
+        logger.info(
+            "pipeline_loading",
+            extra={"model_id": model_id, "device": device}
+        )
+        
+        from diffusers import StableDiffusionPipeline
+        app_state.pipeline = StableDiffusionPipeline.from_pretrained(model_id)
+        
+        if device == "cuda":
+            app_state.pipeline = app_state.pipeline.to(device, dtype=torch.float16)
+        else:
+            app_state.pipeline = app_state.pipeline.to(device, dtype=torch.float32)
+        
+        app_state.pipeline_initialized = True
+        logger.info(
+            "pipeline_loaded",
+            extra={"model_id": model_id, "device": device}
+        )
+        
+        # Initialize generation adapter
+        from service.generation import StableDiffusionSeedBiasAdapter
+        app_state.generation_adapter = StableDiffusionSeedBiasAdapter(
+            model_id=model_id,
+            device=device,
+            use_fp16=(device == "cuda"),
+        )
+        logger.info("generation_adapter_initialized", extra={"method": "app_state"})
+        
+        # Initialize detection service if artifacts available
+        if is_detection_available():
+            from service.detection import DetectionService
+            app_state.detection_service = DetectionService(
+                authority=app_state.authority,
+                pipeline=app_state.pipeline,
+            )
+            logger.info("detection_service_initialized", extra={"method": "app_state"})
+    
+    app_state.is_ready = True
+    logger.info("app_state_initialized")
+
+
+async def cleanup_app_state(app_state: AppState) -> None:
+    """
+    Cleanup app state during shutdown.
+    
+    Called during FastAPI lifespan shutdown.
+    
+    Args:
+        app_state: AppState instance to cleanup
+    """
+    logger.info("app_state_cleanup_starting")
+    
+    app_state.is_ready = False
+    
+    # Disable micro-batching if enabled
+    if app_state.detection_service is not None:
+        if hasattr(app_state.detection_service, '_detection_worker') and \
+           app_state.detection_service._detection_worker is not None:
+            await app_state.detection_service.disable_micro_batching()
+            logger.info("micro_batching_disabled")
+    
+    # Clear references
+    app_state.detection_service = None
+    app_state.generation_adapter = None
+    app_state.pipeline = None
+    app_state.authority = None
+    
+    logger.info("app_state_cleanup_completed")

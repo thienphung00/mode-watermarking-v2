@@ -9,16 +9,16 @@ No pipeline or watermark logic is modified.
 from __future__ import annotations
 
 import io
-import logging
+from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse
 from PIL import Image
-from pathlib import Path
 
 from service.app.dependencies import get_detection_service, is_detection_available, get_detection_availability_status
+from service.infra.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -105,7 +105,10 @@ async def demo_verify(
         # Convert to PIL Image
         img = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        logger.info(f"Demo verify: processing image, key_id={effective_key_id}")
+        logger.info(
+            "demo_verify_started",
+            extra={"key_id": effective_key_id}
+        )
         
         # Get detection service (will raise if artifacts not available)
         try:
@@ -129,8 +132,13 @@ async def demo_verify(
         )
         
         logger.info(
-            f"Demo verify complete: key_id={effective_key_id}, "
-            f"detected={result['detected']}, score={result['score']:.4f}"
+            "demo_verify_completed",
+            extra={
+                "key_id": effective_key_id,
+                "verified": result["detected"],
+                "score": round(result["score"], 4),
+                "confidence": round(result["confidence"], 4),
+            }
         )
         
         # Return simplified, demo-safe response
@@ -151,6 +159,10 @@ async def demo_verify(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in demo verify: {e}", exc_info=True)
+        logger.error(
+            "demo_verify_failed",
+            extra={"error": str(e)},
+            exc_info=True
+        )
         raise HTTPException(status_code=400, detail=str(e))
 

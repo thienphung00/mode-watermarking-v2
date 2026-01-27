@@ -270,10 +270,7 @@ class DiffusionConfig(BaseModel):
     scheduler_kwargs: Dict[str, Any] = Field(default_factory=dict, description="Scheduler kwargs")
 
     # Guidance
-    guidance_scale: float = Field(7.5, gt=0.0, description="Guidance scale")
-    guidance_scale_range: Tuple[float, float] = Field(
-        (3.0, 15.0), description="Guidance scale range"
-    )
+    guidance_scale: float = Field(1.0, gt=0.0, description="Guidance scale")
 
     # Memory optimization
     use_fp16: bool = Field(True, description="Use FP16 precision")

@@ -43,15 +43,194 @@ from PIL import Image
 from tqdm import tqdm
 
 from src.core.config import AppConfig
+from src.core.key_utils import UNWATERMARKED_DUMMY_KEY
 from src.engine.pipeline import create_pipeline
 from src.detection.inversion import DDIMInverter
 from src.detection.g_values import compute_g_values, g_field_config_to_dict
 from scripts.utils import setup_logging, get_device
 
 
+def load_manifest_entries(manifest_path: str) -> list[Dict[str, Any]]:
+    """
+    Load and flatten manifest file (JSON or JSONL).
+    
+    Supports multiple manifest schemas:
+    - JSONL: Each line is a sample entry (legacy)
+    - JSON list: Flat list of sample entries (legacy)
+    - JSON dict: Grouped format with 'watermarked' and/or 'clean' keys (new)
+    
+    Args:
+        manifest_path: Path to manifest file
+        
+    Returns:
+        List of manifest entries (flattened). Each entry must have 'image_path' field.
+        The 'prompt' field is automatically stripped to prevent leakage.
+        
+    Raises:
+        FileNotFoundError: If manifest file doesn't exist
+        ValueError: If manifest schema is invalid or unsupported
+        RuntimeError: If entries are missing required fields
+    """
+    manifest_path_obj = Path(manifest_path)
+    if not manifest_path_obj.exists():
+        raise FileNotFoundError(f"Manifest file not found: {manifest_path_obj}")
+    
+    entries = []
+    schema_type = None
+    
+    # Detect and load based on file extension
+    if manifest_path_obj.suffix == ".jsonl":
+        # JSONL format: stream line-by-line
+        schema_type = "JSONL (line-by-line)"
+        with open(manifest_path_obj, "r") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        raise ValueError(
+                            f"Invalid JSON on line {line_num} of {manifest_path_obj}: {e}"
+                        )
+    
+    elif manifest_path_obj.suffix == ".json":
+        # JSON format: load entire file
+        with open(manifest_path_obj, "r") as f:
+            data = json.load(f)
+        
+        if isinstance(data, list):
+            # Legacy format: flat list of entries
+            schema_type = "JSON (flat list)"
+            entries = data
+        
+        elif isinstance(data, dict):
+            # New grouped format: dict with 'watermarked' and/or 'clean' keys
+            detected_keys = list(data.keys())
+            
+            # Check if this looks like the grouped format
+            if "watermarked" in data or "clean" in data:
+                schema_type = f"JSON (grouped: {detected_keys})"
+                entries = []
+                
+                # Flatten entries from grouped structure
+                if "watermarked" in data:
+                    watermarked = data["watermarked"]
+                    if isinstance(watermarked, list):
+                        entries.extend(watermarked)
+                    else:
+                        raise ValueError(
+                            f"Invalid manifest schema. "
+                            f"'watermarked' key must contain a list of entries, got {type(watermarked)}. "
+                            f"Manifest: {manifest_path_obj}"
+                        )
+                
+                if "clean" in data:
+                    clean = data["clean"]
+                    if isinstance(clean, list):
+                        entries.extend(clean)
+                    else:
+                        raise ValueError(
+                            f"Invalid manifest schema. "
+                            f"'clean' key must contain a list of entries, got {type(clean)}. "
+                            f"Manifest: {manifest_path_obj}"
+                        )
+            
+            # Legacy fallback: check for "samples" key
+            elif "samples" in data:
+                schema_type = "JSON (dict with 'samples' key)"
+                entries = data["samples"]
+                if not isinstance(entries, list):
+                    raise ValueError(
+                        f"Invalid manifest schema. "
+                        f"'samples' key must contain a list of entries, got {type(entries)}. "
+                        f"Manifest: {manifest_path_obj}"
+                    )
+            
+            else:
+                # Unknown dict structure
+                raise ValueError(
+                    f"Invalid manifest schema. "
+                    f"Expected sample entry with field 'image_path'. "
+                    f"Detected manifest root keys: {detected_keys}. "
+                    f"Manifest: {manifest_path_obj}\n"
+                    f"Supported formats:\n"
+                    f"  - Flat list: [{{sample_entry}}, ...]\n"
+                    f"  - Grouped dict: {{'watermarked': [...], 'clean': [...]}}\n"
+                    f"  - Dict with 'samples' key: {{'samples': [...]}}\n"
+                    f"Did you forget to flatten grouped manifest format?"
+                )
+        
+        else:
+            raise ValueError(
+                f"Invalid manifest schema. "
+                f"Expected list or dict at root, got {type(data)}. "
+                f"Manifest: {manifest_path_obj}"
+            )
+    
+    else:
+        raise ValueError(
+            f"Unsupported manifest format: {manifest_path_obj.suffix}. "
+            f"Supported formats: .json, .jsonl"
+        )
+    
+    # Validate entries
+    if not entries:
+        raise RuntimeError(
+            f"Manifest contains no entries. "
+            f"Manifest: {manifest_path_obj}, "
+            f"Schema type: {schema_type or 'unknown'}"
+        )
+    
+    # Validate each entry has required fields
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"Invalid manifest entry {i}. "
+                f"Expected dict, got {type(entry)}. "
+                f"Manifest: {manifest_path_obj}, "
+                f"Schema type: {schema_type or 'unknown'}"
+            )
+        
+        if "image_path" not in entry:
+            available_keys = list(entry.keys())
+            raise RuntimeError(
+                f"Entry {i} has no 'image_path' field.\n"
+                f"Manifest: {manifest_path_obj}\n"
+                f"Schema type: {schema_type or 'unknown'}\n"
+                f"Entry keys: {available_keys}\n"
+                f"Expected sample entry with field 'image_path'. "
+                f"Did you forget to flatten grouped manifest format?"
+            )
+    
+    # CRITICAL: Strip 'prompt' field immediately to prevent leakage into detection
+    # This must happen AFTER validation to ensure we've loaded valid entries
+    # but BEFORE returning entries so they never contain prompt data
+    prompt_stripped_count = 0
+    for entry in entries:
+        if "prompt" in entry:
+            del entry["prompt"]
+            prompt_stripped_count += 1
+    
+    # Log warning if prompt was found and stripped (once)
+    if prompt_stripped_count > 0:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"Stripped 'prompt' field from {prompt_stripped_count} manifest entries "
+            f"to prevent information leakage into detection pipeline. "
+            f"Manifest: {manifest_path_obj}"
+        )
+    
+    return entries
+
+
+# Alias for backward compatibility
 def load_manifest(manifest_path: str) -> list[Dict[str, Any]]:
     """
     Load manifest file (JSON or JSONL).
+    
+    DEPRECATED: Use load_manifest_entries() instead.
+    This function is kept for backward compatibility.
     
     Args:
         manifest_path: Path to manifest file
@@ -59,27 +238,7 @@ def load_manifest(manifest_path: str) -> list[Dict[str, Any]]:
     Returns:
         List of manifest entries
     """
-    manifest_path = Path(manifest_path)
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
-    
-    entries = []
-    if manifest_path.suffix == ".json":
-        with open(manifest_path, "r") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                entries = data
-            elif isinstance(data, dict):
-                entries = data.get("samples", [data])
-    elif manifest_path.suffix == ".jsonl":
-        with open(manifest_path, "r") as f:
-            for line in f:
-                if line.strip():
-                    entries.append(json.loads(line))
-    else:
-        raise ValueError(f"Unsupported manifest format: {manifest_path.suffix}")
-    
-    return entries
+    return load_manifest_entries(manifest_path)
 
 
 def extract_label(entry: Dict[str, Any], entry_index: int) -> int:
@@ -215,6 +374,21 @@ def precompute_inverted_g_values(
     """
     logger = setup_logging()
     
+    # ============================================================================
+    # Explicit Startup Logging (Required Parameters)
+    # ============================================================================
+    guidance_scale = config.diffusion.guidance_scale
+    master_key_hash = hashlib.sha256(master_key.encode()).hexdigest()[:16]
+    
+    logger.info("=" * 80)
+    logger.info("Precompute Pipeline Configuration")
+    logger.info("=" * 80)
+    logger.info(f"guidance_scale: {guidance_scale}")
+    logger.info(f"num_inversion_steps: {num_inversion_steps}")
+    logger.info(f"master_key_hash: {master_key_hash}")
+    logger.info(f"UNWATERMARKED_DUMMY_KEY: {UNWATERMARKED_DUMMY_KEY}")
+    logger.info("=" * 80)
+    
     # Set seed for deterministic processing
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -306,16 +480,29 @@ def precompute_inverted_g_values(
     logger.info("=" * 80)
     
     # ============================================================================
-    # Train/Val/Test Symmetry Enforcement
+    # Train/Val/Test Symmetry Enforcement (Comprehensive Validation)
     # ============================================================================
-    # If metadata.json already exists, validate that:
-    # 1. The g_field_config_hash matches (same config)
-    # 2. The config_path matches (same config file)
-    # 3. The master_key is the same (required for PRF consistency)
-    # This ensures all datasets (train/val/test) use identical watermark config.
+    # If metadata.json already exists, validate ALL symmetry parameters:
+    # 1. g_field_config_hash (same watermark config)
+    # 2. config_path (same config file)
+    # 3. guidance_scale (same inversion guidance)
+    # 4. num_inversion_steps (same inversion steps)
+    # 5. master_key_hash (same master key for PRF)
+    # This ensures all datasets (train/val/test) use identical parameters.
     
     metadata_path = output_dir / "metadata.json"
     config_path_obj = Path(config_path).resolve()
+    
+    # Required metadata fields for validation
+    required_metadata_fields = [
+        "latent_type",
+        "num_inversion_steps",
+        "guidance_scale",
+        "g_field_config_hash",
+        "master_key_hash",
+        "config_path",
+        "num_samples",
+    ]
     
     if metadata_path.exists():
         logger.info(f"Existing metadata found at {metadata_path}")
@@ -324,10 +511,23 @@ def precompute_inverted_g_values(
         with open(metadata_path, "r") as f:
             existing_metadata = json.load(f)
         
+        # Check for missing required fields (fail immediately, no migration)
+        missing_fields = [f for f in required_metadata_fields if f not in existing_metadata]
+        if missing_fields:
+            raise ValueError(
+                f"Existing metadata is missing required fields: {missing_fields}.\n"
+                f"Metadata path: {metadata_path}\n"
+                f"Existing metadata keys: {list(existing_metadata.keys())}\n"
+                f"This metadata format is incompatible. Please regenerate."
+            )
+        
         existing_hash = existing_metadata.get("g_field_config_hash")
         existing_config_path = existing_metadata.get("config_path")
+        existing_guidance_scale = existing_metadata.get("guidance_scale")
+        existing_num_inversion_steps = existing_metadata.get("num_inversion_steps")
+        existing_master_key_hash = existing_metadata.get("master_key_hash")
         
-        # Validate hash matches
+        # Validate g_field_config_hash matches
         if existing_hash != g_field_config_hash:
             raise ValueError(
                 f"G-field config hash mismatch!\n"
@@ -350,8 +550,42 @@ def precompute_inverted_g_values(
                 f"  All datasets must use the same config file path."
             )
         
-        logger.info("✓ Hash and config path match existing metadata")
-        logger.info("✓ Train/val/test symmetry validated")
+        # Validate guidance_scale matches
+        if existing_guidance_scale != guidance_scale:
+            raise ValueError(
+                f"Guidance scale mismatch!\n"
+                f"  Existing guidance_scale (from {metadata_path}): {existing_guidance_scale}\n"
+                f"  Current guidance_scale (from config): {guidance_scale}\n"
+                f"  Inversion parameters must match exactly for symmetry.\n"
+                f"  All datasets (train/val/test) must use the same guidance_scale."
+            )
+        
+        # Validate num_inversion_steps matches
+        if existing_num_inversion_steps != num_inversion_steps:
+            raise ValueError(
+                f"Inversion steps mismatch!\n"
+                f"  Existing num_inversion_steps (from {metadata_path}): {existing_num_inversion_steps}\n"
+                f"  Current num_inversion_steps (from CLI): {num_inversion_steps}\n"
+                f"  Inversion parameters must match exactly for symmetry.\n"
+                f"  All datasets (train/val/test) must use the same num_inversion_steps."
+            )
+        
+        # Validate master_key_hash matches
+        if existing_master_key_hash != master_key_hash:
+            raise ValueError(
+                f"Master key hash mismatch!\n"
+                f"  Existing master_key_hash (from {metadata_path}): {existing_master_key_hash}\n"
+                f"  Current master_key_hash: {master_key_hash}\n"
+                f"  Master key must be identical for PRF consistency.\n"
+                f"  All datasets (train/val/test) must use the same master key."
+            )
+        
+        logger.info("✓ All symmetry parameters validated")
+        logger.info(f"  - g_field_config_hash: {g_field_config_hash}")
+        logger.info(f"  - config_path: {config_path_obj}")
+        logger.info(f"  - guidance_scale: {guidance_scale}")
+        logger.info(f"  - num_inversion_steps: {num_inversion_steps}")
+        logger.info(f"  - master_key_hash: {master_key_hash}")
     
     # Create subdirectories for g-values and masks
     g_values_dir = output_dir / "g_values"
@@ -369,6 +603,10 @@ def precompute_inverted_g_values(
     
     # Process each image
     g_manifest_entries = []
+    
+    # Track failures for dataset contamination detection
+    total_images = len(entries)
+    failed_images = 0
     
     logger.info("Processing images...")
     for i, entry in enumerate(tqdm(entries, desc="Precomputing g-values")):
@@ -415,7 +653,7 @@ def precompute_inverted_g_values(
                 image,
                 num_inference_steps=num_inversion_steps,
                 prompt="",  # Unconditional inversion
-                guidance_scale=1.0,
+                guidance_scale=guidance_scale,
             )  # [1, 4, 64, 64]
             
             # ========================================================================
@@ -426,7 +664,7 @@ def precompute_inverted_g_values(
             # The dummy key ensures consistent computation, but key_id in manifest remains None.
             # This matches detection logic: unwatermarked samples have no semantic key.
             
-            computation_key = key_id if key_id is not None else "__unwatermarked_dummy_key__"
+            computation_key = key_id if key_id is not None else UNWATERMARKED_DUMMY_KEY
             g, mask = compute_g_values(
                 latent_T,
                 computation_key,
@@ -501,8 +739,24 @@ def precompute_inverted_g_values(
             g_manifest_entries.append(g_manifest_entry)
             
         except Exception as e:
+            failed_images += 1
             logger.error(f"Error processing {image_path}: {e}", exc_info=True)
             continue
+    
+    # Log failure summary
+    failure_ratio = failed_images / total_images if total_images > 0 else 0.0
+    logger.info("=" * 80)
+    logger.info("Processing Summary")
+    logger.info("=" * 80)
+    logger.info(f"total_images: {total_images}")
+    logger.info(f"failed_images: {failed_images}")
+    logger.info(f"failure_ratio: {failure_ratio:.4f} ({failure_ratio * 100:.2f}%)")
+    if failure_ratio > 0.01:
+        logger.warning(
+            f"Failure ratio exceeds 1% ({failure_ratio * 100:.2f}%). "
+            f"This may indicate dataset contamination or configuration issues."
+        )
+    logger.info("=" * 80)
     
     # Save g-values manifest
     g_manifest_path = output_dir / "g_manifest.jsonl"
@@ -518,6 +772,8 @@ def precompute_inverted_g_values(
     # 1. Generation, precompute, and detection used the same watermark config
     # 2. All datasets (train/val/test) used identical config (via hash comparison)
     # 3. The exact config file path is preserved for debugging
+    # 4. All inversion parameters (guidance_scale, num_inversion_steps) match
+    # 5. Master key is consistent (via hash comparison)
     # 
     # The g_field_config_hash is the key to proving config alignment:
     # - Same config → same hash → provably aligned
@@ -526,7 +782,9 @@ def precompute_inverted_g_values(
     metadata = {
         "latent_type": "zT",  # CRITICAL: Must match detection (zT, not z0)
         "num_inversion_steps": num_inversion_steps,
+        "guidance_scale": guidance_scale,
         "g_field_config_hash": g_field_config_hash,  # Deterministic hash for fast comparison
+        "master_key_hash": master_key_hash,  # Deterministic hash of master key (never store raw key)
         "g_field_config": g_field_config,  # Full config for detailed inspection
         "config_path": str(config_path_obj),  # Actual config file path
         "num_samples": len(g_manifest_entries),
@@ -536,12 +794,16 @@ def precompute_inverted_g_values(
     logger.info(f"  G-field config hash: {g_field_config_hash}")
     logger.info(f"  Config path: {config_path_obj}")
     logger.info(f"  Latent type: zT (DDIM-inverted)")
+    logger.info(f"  Guidance scale: {guidance_scale}")
+    logger.info(f"  Inversion steps: {num_inversion_steps}")
+    logger.info(f"  Master key hash: {master_key_hash}")
     
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
     
     logger.info(f"Precomputation complete!")
     logger.info(f"  Processed: {len(g_manifest_entries)} images")
+    logger.info(f"  Failed: {failed_images} images")
     logger.info(f"  G-values saved to: {g_values_dir}")
     logger.info(f"  Masks saved to: {masks_dir}")
     logger.info(f"  Manifest saved to: {g_manifest_path}")

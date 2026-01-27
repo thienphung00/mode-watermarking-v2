@@ -30,7 +30,14 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from src.core.config import AppConfig, compute_cache_key, WatermarkedConfig
+from src.core.config import AppConfig, WatermarkedConfig
+from src.core.key_utils import (
+    build_latent_cache_key,
+    derive_key_fingerprint,
+    log_key_and_cache_identity,
+    compute_geometry_hash,
+    compute_config_hash,
+)
 from src.engine.pipeline import create_pipeline
 from src.detection.inversion import DDIMInverter
 from src.detection.g_values import compute_g_values, g_field_config_to_dict
@@ -137,6 +144,7 @@ def compute_detection_statistics(
     num_inversion_steps: int = 25,
     latent_cache_dir: Optional[Path] = None,
     model_id: Optional[str] = None,
+    allow_cache_rebuild: bool = False,
 ) -> Dict[str, float]:
     """
     Compute detection statistics for a single image.
@@ -170,9 +178,8 @@ def compute_detection_statistics(
     if latent_cache_dir is not None:
         image_id = image_path.stem
         
-        # Use comprehensive cache key that includes geometry signature, config, etc.
-        # CRITICAL: Include master_key and key_id for key isolation
-        cache_key = compute_cache_key(
+        # Use centralized cache key construction (SINGLE SOURCE OF TRUTH)
+        cache_key = build_latent_cache_key(
             image_id=image_id,
             config=config,
             num_inversion_steps=num_inversion_steps,
@@ -192,9 +199,8 @@ def compute_detection_statistics(
                     cached_metadata = cached_data.get("metadata", {})
                     
                     # CRITICAL: Verify key fingerprint matches (hard fail on mismatch)
-                    from src.core.config import compute_key_fingerprint
                     if isinstance(config.watermark, WatermarkedConfig):
-                        expected_key_fingerprint = compute_key_fingerprint(
+                        expected_key_fingerprint = derive_key_fingerprint(
                             master_key,
                             key_id,
                             config.watermark.key_settings.prf_config
@@ -202,23 +208,37 @@ def compute_detection_statistics(
                         cached_key_fingerprint = cached_metadata.get("key_fingerprint")
                         
                         if cached_key_fingerprint is None:
-                            # Old cache format without key fingerprint - invalidate
-                            logger.error(
+                            # Old cache format without key fingerprint
+                            if not allow_cache_rebuild:
+                                raise RuntimeError(
+                                    f"KEY VALIDATION FAILED: Cache entry {cache_path} missing key_fingerprint. "
+                                    f"This cache was created before key isolation fixes. "
+                                    f"Cache must be regenerated. "
+                                    f"To rebuild cache, use --allow-cache-rebuild flag."
+                                )
+                            logger.warning(
                                 f"Cache entry {cache_path} missing key_fingerprint. "
-                                f"This cache was created before key isolation fixes. "
-                                f"Invalidating cache."
+                                f"Invalidating and regenerating (--allow-cache-rebuild enabled)."
                             )
                             latent_T = None
                         elif cached_key_fingerprint != expected_key_fingerprint:
-                            # Key mismatch - hard fail
-                            raise RuntimeError(
-                                f"KEY MISMATCH: Cached latent was created with different key. "
-                                f"Cached key_fingerprint: {cached_key_fingerprint[:16]}..., "
-                                f"Expected key_fingerprint: {expected_key_fingerprint[:16]}.... "
-                                f"Cache path: {cache_path}. "
-                                f"This artifact cannot be reused with a different key. "
-                                f"Delete the cache or use the correct key."
+                            # Key mismatch
+                            if not allow_cache_rebuild:
+                                raise RuntimeError(
+                                    f"KEY MISMATCH: Cached latent was created with different key.\n"
+                                    f"  Cached key_fingerprint: {cached_key_fingerprint[:16]}...\n"
+                                    f"  Expected key_fingerprint: {expected_key_fingerprint[:16]}...\n"
+                                    f"  Cache path: {cache_path}\n"
+                                    f"  Filename fingerprint: {cache_key}\n"
+                                    f"This artifact cannot be reused with a different key.\n"
+                                    f"Delete the cache or use the correct key.\n"
+                                    f"To rebuild cache, use --allow-cache-rebuild flag."
+                                )
+                            logger.warning(
+                                f"Key mismatch detected. Invalidating cache and regenerating "
+                                f"(--allow-cache-rebuild enabled)."
                             )
+                            latent_T = None
                     
                     # VALIDATION: Check metadata matches current request
                     expected_metadata = {
@@ -275,10 +295,9 @@ def compute_detection_statistics(
                 image_id = image_path.stem
                 
                 # CRITICAL: Store key fingerprint in metadata
-                from src.core.config import compute_key_fingerprint
                 key_fingerprint = None
                 if isinstance(config.watermark, WatermarkedConfig):
-                    key_fingerprint = compute_key_fingerprint(
+                    key_fingerprint = derive_key_fingerprint(
                         master_key,
                         key_id,
                         config.watermark.key_settings.prf_config
@@ -351,13 +370,12 @@ def compute_detection_statistics(
     p_hat = S / N_eff if N_eff > 0 else 0.0
     
         # Compute log_odds using detector
-        if detector.use_trained:
+    if detector.use_trained:
             try:
                 # CRITICAL: Verify key fingerprint when scoring
-                from src.core.config import compute_key_fingerprint
                 expected_key_fingerprint = None
                 if isinstance(config.watermark, WatermarkedConfig):
-                    expected_key_fingerprint = compute_key_fingerprint(
+                    expected_key_fingerprint = derive_key_fingerprint(
                         master_key,
                         key_id,
                         config.watermark.key_settings.prf_config
@@ -368,9 +386,9 @@ def compute_detection_statistics(
             except Exception as e:
                 logger.warning(f"Bayesian detector failed: {e}")
                 log_odds = 0.0
-        else:
-            logger.warning("Detector not trained, log_odds = 0.0")
-            log_odds = 0.0
+    else:
+        logger.warning("Detector not trained, log_odds = 0.0")
+        log_odds = 0.0
     
     return {
         "log_odds": float(log_odds),
@@ -388,6 +406,8 @@ def run_detection_for_config(
     device: str,
     cache_dir: Path,
     num_inversion_steps: int = 25,
+    allow_cache_rebuild: bool = False,
+    dry_run: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Run detection for a single config.
@@ -414,6 +434,75 @@ def run_detection_for_config(
     # Create cache directory for this config
     config_cache_dir = cache_dir / config_name
     latent_cache_dir = config_cache_dir / "latents"
+    
+    # CRITICAL: Load and validate latent manifest from Phase 1
+    latent_manifest_path = config_cache_dir / "latent_manifest.json"
+    if not latent_manifest_path.exists():
+        logger.warning(
+            f"Latent manifest not found: {latent_manifest_path}. "
+            f"Phase 1 must run first to create manifest. "
+            f"Skipping {config_name}."
+        )
+        return None
+    
+    with open(latent_manifest_path, "r") as f:
+        latent_manifest = json.load(f)
+    
+    # Get key_id and compute expected key fingerprint
+    key_id = None
+    expected_key_fingerprint = None
+    if isinstance(config.watermark, WatermarkedConfig):
+        key_id = config.watermark.key_settings.key_id
+        expected_key_fingerprint = derive_key_fingerprint(
+            master_key,
+            key_id,
+            config.watermark.key_settings.prf_config
+        )
+    
+    # CRITICAL: Validate manifest key fingerprint matches runtime key
+    manifest_key_fingerprint = latent_manifest.get("master_key_fingerprint")
+    if manifest_key_fingerprint is not None and expected_key_fingerprint is not None:
+        if manifest_key_fingerprint != expected_key_fingerprint:
+            raise RuntimeError(
+                f"KEY MISMATCH: Latent manifest was created with different key.\n"
+                f"  Manifest key_fingerprint: {manifest_key_fingerprint[:16]}...\n"
+                f"  Expected key_fingerprint: {expected_key_fingerprint[:16]}...\n"
+                f"  Manifest path: {latent_manifest_path}\n"
+                f"  This prevents accidental reuse of incompatible caches.\n"
+                f"  Delete the cache or use the correct key."
+            )
+    
+    # Validate other manifest fields
+    manifest_config_hash = latent_manifest.get("config_hash")
+    manifest_geometry_hash = latent_manifest.get("geometry_hash")
+    current_config_hash = compute_config_hash(config)
+    current_geometry_hash = compute_geometry_hash(config)
+    
+    if manifest_config_hash != current_config_hash:
+        logger.warning(
+            f"Config hash mismatch: manifest={manifest_config_hash}, current={current_config_hash}. "
+            f"Proceeding with caution."
+        )
+    if manifest_geometry_hash != current_geometry_hash:
+        logger.warning(
+            f"Geometry hash mismatch: manifest={manifest_geometry_hash}, current={current_geometry_hash}. "
+            f"Proceeding with caution."
+        )
+    
+    # Log key and cache identity at startup
+    log_key_and_cache_identity(
+        master_key=master_key,
+        key_id=key_id,
+        config=config,
+        cache_root=cache_dir,
+        cache_namespace=config_name,
+        num_inversion_steps=num_inversion_steps,
+    )
+    
+    # Dry-run mode: just validate and exit
+    if dry_run:
+        logger.info("[DRY RUN] Key and cache identity validated. Exiting.")
+        return None
     
     # Check if dataset exists
     manifest_path = config_cache_dir / "manifest.json"
@@ -472,6 +561,7 @@ def run_detection_for_config(
             num_inversion_steps=num_inversion_steps,
             latent_cache_dir=latent_cache_dir,
             model_id=config.diffusion.model_id,
+            allow_cache_rebuild=allow_cache_rebuild,
         )
         
         log_odds_wm.append(stats["log_odds"])
@@ -607,6 +697,16 @@ Examples:
         default=25,
         help="Number of DDIM inversion steps",
     )
+    parser.add_argument(
+        "--allow-cache-rebuild",
+        action="store_true",
+        help="Allow cache rebuild on key mismatch (default: fail-fast)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry-run mode: validate key and cache identity, then exit",
+    )
     
     args = parser.parse_args()
     
@@ -672,6 +772,8 @@ Examples:
                     device=args.device,
                     cache_dir=args.cache_dir,
                     num_inversion_steps=args.num_inversion_steps,
+                    allow_cache_rebuild=args.allow_cache_rebuild,
+                    dry_run=args.dry_run,
                 )
                 
                 # Skip if result is None (config was skipped)

@@ -11,15 +11,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-import logging
 
 from fastapi import APIRouter, HTTPException
 from PIL import Image
 
 from service.app.schemas import DetectRequest, DetectResponse
 from service.app.dependencies import get_detection_service, is_detection_available
+from service.infra.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -99,7 +99,7 @@ async def detect(request: DetectRequest) -> DetectResponse:
         # Step 3: Decode image
         image = decode_base64_image(request.image_base64)
         
-        logger.info(f"Detecting watermark: key_id={request.key_id}")
+        logger.info("detection_started", extra={"key_id": request.key_id})
         
         # Step 4: Run detection (prompt-agnostic)
         # If micro-batching worker is enabled, use it for batching
@@ -115,8 +115,13 @@ async def detect(request: DetectRequest) -> DetectResponse:
             )
         
         logger.info(
-            f"Detection complete: key_id={request.key_id}, "
-            f"detected={result['detected']}, score={result['score']:.4f}"
+            "detection_completed",
+            extra={
+                "key_id": request.key_id,
+                "detected": result["detected"],
+                "score": round(result["score"], 4),
+                "confidence": round(result["confidence"], 4),
+            }
         )
         
         return DetectResponse(
@@ -143,6 +148,10 @@ async def detect(request: DetectRequest) -> DetectResponse:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error detecting watermark: {e}", exc_info=True)
+        logger.error(
+            "detection_failed",
+            extra={"error": str(e)},
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Failed to detect watermark: {str(e)}")
 

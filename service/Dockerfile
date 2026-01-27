@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install FastAPI and uvicorn
 RUN pip install --no-cache-dir fastapi uvicorn[standard] cryptography python-multipart
+RUN pip install --no-cache-dir google-cloud-pubsub
 
 # Set HuggingFace cache directory (can be overridden via volume mount)
 ENV HF_HOME=/app/.cache/huggingface

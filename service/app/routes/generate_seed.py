@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
+from service.infra.logging import get_logger
 from typing import Dict
 
 import torch
@@ -18,7 +18,7 @@ from service.infra.db import get_db
 from service.infra.security import generate_watermark_id, generate_master_key
 from service.app.dependencies import create_seed_bias_strategy_for_service, get_pipeline
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 

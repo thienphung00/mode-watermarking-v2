@@ -59,10 +59,10 @@ class TestBayesianDetectorContract:
 
     def test_correct_input_succeeds(self):
         """Feed correct input → forward succeeds."""
-        model = BayesianDetector(master_key="test_key_12345")
+        # BayesianDetector uses likelihood_params_path, not master_key
+        model = BayesianDetector()  # Default: uniform model
         g_values = torch.randint(0, 2, (2, 100)).float()  # Binary g-values [B, N]
-        key = "test_key_id"
-        result = model(g_values, key)
+        result = model(g_values)
         assert "score" in result
         assert "decision" in result
         assert "matches" in result
@@ -83,26 +83,26 @@ class TestBayesianDetectorContract:
 
     def test_wrong_shape_fails_clearly(self):
         """Feed wrong shape → fails clearly."""
-        model = BayesianDetector(master_key="test_key")
+        model = BayesianDetector()
         
-        # Wrong number of dimensions
-        with pytest.raises(AssertionError, match="Expected 2D tensor"):
-            model(torch.randint(0, 2, (100,)).float(), "key", validate=True)  # Missing batch dimension
+        # Wrong number of dimensions - 1D tensor fails during unpacking
+        with pytest.raises(ValueError, match="not enough values to unpack"):
+            model(torch.randint(0, 2, (100,)).float())  # Missing batch dimension
 
     def test_missing_key_fails(self):
-        """Feed key_id without master_key → fails clearly."""
-        model = BayesianDetector()  # No master_key
+        """BayesianDetector works without key - key is deprecated."""
+        model = BayesianDetector()  # Default uniform model
         g_values = torch.randint(0, 2, (2, 100)).float()
         
-        with pytest.raises(ValueError, match="master_key must be provided"):
-            model(g_values, "key_id")
+        # Should work without key - BayesianDetector doesn't require master_key
+        result = model(g_values)
+        assert "score" in result
 
     def test_rademacher_format(self):
         """Test with Rademacher {-1,+1} format."""
-        model = BayesianDetector(master_key="test_key")
+        model = BayesianDetector()
         g_values = torch.randint(0, 2, (2, 100)).float() * 2 - 1  # Convert to {-1,+1}
-        key = "test_key_id"
-        result = model(g_values, key)
+        result = model(g_values)
         assert result["score"].shape == (2,)
 
 

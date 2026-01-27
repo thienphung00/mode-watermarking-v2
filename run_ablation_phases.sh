@@ -13,7 +13,7 @@
 # Output: experiments/watermark_ablation/families/family_XXX/{signature.json, configs.json}
 
 python scripts/generate_ablation_configs.py \
-    --configs-dir experiments/watermark_ablation/configs \
+    --dirconfigs- experiments/watermark_ablation/configs \
     --output-dir experiments/watermark_ablation/families
 
 # ============================================================================
@@ -26,11 +26,11 @@ python scripts/run_ablation_g_export.py \
     --families-dir experiments/watermark_ablation/families \
     --cache-dir experiments/watermark_ablation/cache \
     --output-dir experiments/g_datasets \
-    --prompts-file data/prompts.txt \
+    --prompts-file data/coco/prompts_train.txt \
     --num-samples 500 \
-    --master-key "your_secret_master_key_here" \
+    --master-key "secret_key" \
     --device cuda \
-    --num-inversion-steps 25 \
+    --num-inversion-steps 50 \
     --configs-dir experiments/watermark_ablation/configs
 
 # ============================================================================

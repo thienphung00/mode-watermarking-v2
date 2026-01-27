@@ -6,12 +6,12 @@ regardless of project layout, Docker mounts, or external artifact locations.
 """
 from __future__ import annotations
 
-import logging
+from service.infra.logging import get_logger
 import os
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Module-level cache for resolved paths (set at startup)
 _resolved_likelihood_params_path: Optional[Path] = None

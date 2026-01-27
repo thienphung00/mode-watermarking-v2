@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import base64
 import io
-import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -40,8 +39,9 @@ from service.app.schemas import (
     ModelInfo,
 )
 from service.evaluation import ImperceptibilityEvaluationService
+from service.infra.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -64,7 +64,10 @@ def get_evaluation_service() -> ImperceptibilityEvaluationService:
             device=None,  # Auto-detect
             use_fp16=True,
         )
-        logger.info("ImperceptibilityEvaluationService initialized")
+        logger.info(
+            "evaluation_service_initialized",
+            extra={"model_id": "runwayml/stable-diffusion-v1-5"}
+        )
     
     return _evaluation_service
 
@@ -111,8 +114,11 @@ async def evaluate_imperceptibility(
         evaluation_service = get_evaluation_service()
         
         logger.info(
-            f"Evaluating imperceptibility: prompt='{request.prompt[:50]}...', "
-            f"seed={request.seed}"
+            "evaluation_started",
+            extra={
+                "prompt_length": len(request.prompt),
+                "seed": request.seed,
+            }
         )
         
         # Generate baseline and watermarked images with metrics
@@ -143,10 +149,12 @@ async def evaluate_imperceptibility(
         model_info = ModelInfo(**result["model_info"])
         
         logger.info(
-            f"Imperceptibility evaluation completed: "
-            f"L2={difference_metrics.l2:.6f}, "
-            f"PSNR={difference_metrics.psnr:.2f}dB, "
-            f"SSIM={difference_metrics.ssim:.4f}"
+            "evaluation_completed",
+            extra={
+                "l2": round(difference_metrics.l2, 6),
+                "psnr_db": round(difference_metrics.psnr, 2),
+                "ssim": round(difference_metrics.ssim, 4),
+            }
         )
         
         return ImperceptibilityEvalResponse(
@@ -160,7 +168,11 @@ async def evaluate_imperceptibility(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error evaluating imperceptibility: {e}", exc_info=True)
+        logger.error(
+            "evaluation_failed",
+            extra={"error": str(e)},
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Failed to evaluate imperceptibility: {str(e)}"

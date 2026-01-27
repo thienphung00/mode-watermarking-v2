@@ -17,7 +17,6 @@ Detection is prompt-agnostic: uses unconditional DDIM inversion (prompt="", guid
 """
 from __future__ import annotations
 
-import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -35,8 +34,9 @@ from src.models.detectors import BayesianDetector
 
 from .authority import WatermarkAuthorityService
 from .detector_artifacts import DetectorArtifacts
+from .infra.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class StableDiffusionDetectionBackend:
@@ -173,7 +173,10 @@ class DetectionService:
         # Detection mode selection (fast_only/hybrid/full_inversion) is deprecated.
         self.detector_type = "bayesian"
         
-        logger.info(f"DetectionService initialized: detector_type={self.detector_type}, device={self.device}")
+        logger.info(
+            "detection_service_initialized",
+            extra={"detector_type": self.detector_type, "device": self.device}
+        )
         
         # Delegate SD-specific operations to backend
         # NOTE: Detection currently assumes Stable Diffusion generation.
@@ -229,7 +232,7 @@ class DetectionService:
                 mask_path=mask_path,
                 g_field_config=g_field_config,
             )
-            logger.info("Detector artifacts loaded and validated")
+            logger.info("detector_artifacts_loaded")
         
         return self._artifacts
     
@@ -249,7 +252,7 @@ class DetectionService:
             max_batch_size: Maximum batch size before forcing processing (default: 8)
         """
         if self._detection_worker is not None:
-            logger.warning("Detection micro-batching already enabled")
+            logger.warning("micro_batching_already_enabled")
             return
         
         from service.detection_worker import DetectionWorker
@@ -277,7 +280,7 @@ class DetectionService:
         Detect watermark in image (prompt-agnostic).
         
         This method:
-        1. Fetches detection configuration from authority
+        1. Fetches detection configuration from authority (for_local_use=True)
         2. Loads detector artifacts (likelihood_params.json, mask, g-field config)
         3. Encodes image to z_0 (VAE encoding)
         4. Performs prompt-free DDIM inversion to z_T (unconditional: prompt="", guidance_scale=1.0)
@@ -285,6 +288,9 @@ class DetectionService:
         6. Applies mask + binarization
         7. Runs Bayesian detection
         8. Returns product-level results
+        
+        LOCAL EXECUTION: This service runs in-process and uses master_key directly.
+        For remote workers, use the inference client which transmits derived_key only.
         
         Args:
             image: Input image (PIL Image)
@@ -306,8 +312,9 @@ class DetectionService:
             ValueError: If artifacts cannot be loaded or validation fails
         """
         # Step 1: Get detection configuration from authority
-        config = self.authority.get_detection_config(key_id)
-        master_key = config["master_key"]
+        # for_local_use=True because this is in-process detection (not remote worker)
+        config = self.authority.get_detection_config(key_id, for_local_use=True)
+        master_key = config["master_key"]  # Available because for_local_use=True
         detection_config = config["detection_config"]
         g_field_config = config["g_field_config"]
         inversion_config = config.get("inversion", {})
@@ -317,11 +324,20 @@ class DetectionService:
         artifacts = self._load_artifacts(detection_config, g_field_config)
         
         # Step 3: Encode image to z_0 (Stable Diffusion specific: VAE encoding)
-        logger.debug(f"Encoding image to z_0: shape={image.size}, mode={image.mode}")
+        logger.debug(
+            "encoding_image",
+            extra={"image_size": list(image.size), "image_mode": image.mode}
+        )
         z_0 = self.sd_backend.encode_image(image)
         logger.debug(
-            f"z_0 stats: shape={z_0.shape}, min={z_0.min().item():.4f}, "
-            f"max={z_0.max().item():.4f}, mean={z_0.mean().item():.4f}, std={z_0.std().item():.4f}"
+            "z_0_stats",
+            extra={
+                "shape": list(z_0.shape),
+                "min": round(z_0.min().item(), 4),
+                "max": round(z_0.max().item(), 4),
+                "mean": round(z_0.mean().item(), 4),
+                "std": round(z_0.std().item(), 4),
+            }
         )
         
         # Step 4: Perform prompt-free DDIM inversion to z_T
@@ -333,8 +349,12 @@ class DetectionService:
         policy_guidance_scale = inversion_config.get("guidance_scale", 1.0)
         
         logger.debug(
-            f"DDIM inversion config: num_steps={policy_num_steps}, "
-            f"guidance_scale={policy_guidance_scale}, prompt='' (unconditional)"
+            "ddim_inversion_config",
+            extra={
+                "num_steps": policy_num_steps,
+                "guidance_scale": policy_guidance_scale,
+                "prompt": "",
+            }
         )
         
         # Enforce unconditional inversion
@@ -351,15 +371,21 @@ class DetectionService:
             guidance_scale=1.0,  # Unconditional: required for DDIM inversion correctness
         )
         logger.debug(
-            f"z_T stats: shape={z_T.shape}, min={z_T.min().item():.4f}, "
-            f"max={z_T.max().item():.4f}, mean={z_T.mean().item():.4f}, std={z_T.std().item():.4f}"
+            "z_T_stats",
+            extra={
+                "shape": list(z_T.shape),
+                "min": round(z_T.min().item(), 4),
+                "max": round(z_T.max().item(), 4),
+                "mean": round(z_T.mean().item(), 4),
+                "std": round(z_T.std().item(), 4),
+            }
         )
         
         # Step 5: Compute g-values from z_T using exact same code path as precompute
         # This uses the canonical compute_g_values function.
         # This function defines the canonical watermark statistic.
         # All generation, detection, and calibration must use it.
-        logger.debug(f"Computing g-values: key_id={key_id}, latent_type=zT")
+        logger.debug("computing_g_values", extra={"key_id": key_id, "latent_type": "zT"})
         g, mask = compute_g_values(
             z_T,
             key_id,
@@ -369,12 +395,15 @@ class DetectionService:
             latent_type="zT",  # z_T is initial latent
         )
         logger.debug(
-            f"Raw g-values stats: shape={g.shape if g.dim() > 0 else 'scalar'}, "
-            f"min={g.min().item() if g.numel() > 0 else 0:.4f}, "
-            f"max={g.max().item() if g.numel() > 0 else 0:.4f}, "
-            f"mean={g.mean().item() if g.numel() > 0 else 0:.4f}, "
-            f"mask_shape={mask.shape if mask is not None else None}, "
-            f"mask_sum={mask.sum().item() if mask is not None else None}"
+            "raw_g_values_stats",
+            extra={
+                "shape": list(g.shape) if g.dim() > 0 else "scalar",
+                "min": round(g.min().item(), 4) if g.numel() > 0 else 0,
+                "max": round(g.max().item(), 4) if g.numel() > 0 else 0,
+                "mean": round(g.mean().item(), 4) if g.numel() > 0 else 0,
+                "mask_shape": list(mask.shape) if mask is not None else None,
+                "mask_sum": int(mask.sum().item()) if mask is not None else None,
+            }
         )
         
         # Step 6: Apply masking + binarization (exact same logic as detect_bayesian_test.py)
@@ -418,9 +447,14 @@ class DetectionService:
         
         # Log g-value statistics for debugging
         logger.debug(
-            f"G-value stats after normalization: shape={g.shape}, "
-            f"min={g.min().item():.4f}, max={g.max().item():.4f}, "
-            f"mean={g.mean().item():.4f}, unique_values={torch.unique(g).cpu().tolist()}"
+            "g_values_after_normalization",
+            extra={
+                "shape": list(g.shape),
+                "min": round(g.min().item(), 4),
+                "max": round(g.max().item(), 4),
+                "mean": round(g.mean().item(), 4),
+                "unique_values": torch.unique(g).cpu().tolist(),
+            }
         )
         
         # Add batch dimension for detector: [N] -> [1, N]
@@ -448,8 +482,12 @@ class DetectionService:
         
         if cache_key not in self._detector_cache:
             logger.debug(
-                f"Creating new detector for cache_key={cache_key}: "
-                f"threshold={threshold}, prior_watermarked={prior_watermarked}"
+                "detector_created",
+                extra={
+                    "cache_key": str(cache_key),
+                    "threshold": threshold,
+                    "prior_watermarked": prior_watermarked,
+                }
             )
             self._detector_cache[cache_key] = BayesianDetector(
                 likelihood_params_path=str(artifacts.likelihood_params_path),
@@ -458,12 +496,19 @@ class DetectionService:
                 mask=artifacts.mask,  # Use mask from artifacts (validated during loading)
             )
         else:
-            logger.debug(f"Reusing cached detector for cache_key={cache_key}")
+            logger.debug("detector_cache_hit", extra={"cache_key": str(cache_key)})
         
         detector = self._detector_cache[cache_key]
         
-        logger.debug(f"Using detector_type={self.detector_type} for key_id={key_id}")
-        logger.debug(f"Detector config: threshold={threshold}, prior_watermarked={prior_watermarked}")
+        logger.debug(
+            "detector_using",
+            extra={
+                "key_id": key_id,
+                "detector_type": self.detector_type,
+                "threshold": threshold,
+                "prior_watermarked": prior_watermarked,
+            }
+        )
         
         # Step 9: Run detection
         result = detector.score(g, mask=mask)
@@ -488,16 +533,26 @@ class DetectionService:
         
         # Structured logging matching research script output
         logger.info(
-            f"Detection result: key_id={key_id}, "
-            f"log_odds={log_odds:.6f}, posterior={posterior:.6f}, "
-            f"detected={detected} (log_odds > 0), "
-            f"score={score:.6f}, confidence={confidence:.6f}, "
-            f"policy_version={watermark_version}"
+            "detection_result",
+            extra={
+                "key_id": key_id,
+                "detected": detected,
+                "log_odds": round(log_odds, 6),
+                "posterior": round(posterior, 6),
+                "score": round(score, 6),
+                "confidence": round(confidence, 6),
+                "policy_version": watermark_version,
+            }
         )
         logger.debug(
-            f"Full detection stats: g_shape={g.shape}, mask_shape={mask.shape if mask is not None else None}, "
-            f"num_positions={artifacts.num_positions}, "
-            f"threshold={threshold}, prior_watermarked={prior_watermarked}"
+            "detection_stats",
+            extra={
+                "g_shape": list(g.shape),
+                "mask_shape": list(mask.shape) if mask is not None else None,
+                "num_positions": artifacts.num_positions,
+                "threshold": threshold,
+                "prior_watermarked": prior_watermarked,
+            }
         )
         
         return {
@@ -553,7 +608,7 @@ class DetectionService:
         if detection_config_override is not None:
             detection_config = detection_config_override
             g_field_config = g_field_config_override or {}
-            logger.warning("⚠️ Authority bypass enabled — using detection_config_override (testing/demo mode)")
+            logger.warning("authority_bypass_enabled", extra={"mode": "testing/demo"})
         else:
             if key_id is None:
                 raise ValueError(
@@ -607,9 +662,14 @@ class DetectionService:
         
         # Log g-value statistics for debugging
         logger.debug(
-            f"G-value stats after normalization: shape={g.shape}, "
-            f"min={g.min().item():.4f}, max={g.max().item():.4f}, "
-            f"mean={g.mean().item():.4f}, unique_values={torch.unique(g).cpu().tolist()}"
+            "g_values_from_precomputed_normalized",
+            extra={
+                "shape": list(g.shape),
+                "min": round(g.min().item(), 4),
+                "max": round(g.max().item(), 4),
+                "mean": round(g.mean().item(), 4),
+                "unique_values": torch.unique(g).cpu().tolist(),
+            }
         )
         
         # Add batch dimension for detector: [N] -> [1, N]
@@ -635,7 +695,7 @@ class DetectionService:
         
         if detection_config_override is not None:
             # Override mode: create temporary detector (can't cache reliably)
-            logger.debug("Using override mode, creating temporary detector (not cached)")
+            logger.debug("detector_override_mode", extra={"cached": False})
             detector = BayesianDetector(
                 likelihood_params_path=str(artifacts.likelihood_params_path),
                 threshold=threshold,
@@ -648,7 +708,10 @@ class DetectionService:
             # This is a limitation, but detect_from_g_values is mainly for testing
             cache_key: Tuple[str, str] = ("default", self.device)
             if cache_key not in self._detector_cache:
-                logger.debug(f"Creating new detector for cache_key={cache_key}")
+                logger.debug(
+                    "detector_created_from_g_values",
+                    extra={"cache_key": str(cache_key)}
+                )
                 self._detector_cache[cache_key] = BayesianDetector(
                     likelihood_params_path=str(artifacts.likelihood_params_path),
                     threshold=threshold,
@@ -656,11 +719,21 @@ class DetectionService:
                     mask=artifacts.mask,
                 )
             else:
-                logger.debug(f"Reusing cached detector for cache_key={cache_key}")
+                logger.debug(
+                    "detector_cache_hit_from_g_values",
+                    extra={"cache_key": str(cache_key)}
+                )
             detector = self._detector_cache[cache_key]
         
-        logger.debug(f"Using detector_type={self.detector_type} for key_id={key_id}")
-        logger.debug(f"Detector config: threshold={threshold}, prior_watermarked={prior_watermarked}")
+        logger.debug(
+            "detector_using_from_g_values",
+            extra={
+                "key_id": key_id,
+                "detector_type": self.detector_type,
+                "threshold": threshold,
+                "prior_watermarked": prior_watermarked,
+            }
+        )
         
         # Step 6: Run detection
         result = detector.score(g, mask=mask)
@@ -674,8 +747,12 @@ class DetectionService:
         is_watermarked = log_odds > 0
         
         logger.debug(
-            f"Detection result from g-values: log_odds={log_odds:.6f}, "
-            f"posterior={posterior:.6f}, detected={is_watermarked}"
+            "detection_result_from_g_values",
+            extra={
+                "log_odds": round(log_odds, 6),
+                "posterior": round(posterior, 6),
+                "detected": is_watermarked,
+            }
         )
         
         return {

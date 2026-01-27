@@ -10,7 +10,7 @@ Single-process, single-GPU implementation using asyncio and standard Python tool
 from __future__ import annotations
 
 import asyncio
-import logging
+from service.infra.logging import get_logger
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from PIL import Image
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
