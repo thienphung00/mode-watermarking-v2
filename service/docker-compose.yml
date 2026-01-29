@@ -1,0 +1,61 @@
+# Docker Compose for local development
+# Runs API service and GPU worker together
+
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: service/docker/api.Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - GPU_WORKER_URL=http://gpu:8001
+      - STORAGE_BACKEND=local
+      - STORAGE_PATH=/app/data/images
+      - KEY_STORE_PATH=/app/data/keys.json
+      - ARTIFACTS_PATH=/app/data/artifacts
+      - API_DEBUG=false
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      gpu:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  gpu:
+    build:
+      context: ..
+      dockerfile: service/docker/gpu.Dockerfile
+    environment:
+      - GPU_HOST=0.0.0.0
+      - GPU_PORT=8001
+      - MODEL_ID=runwayml/stable-diffusion-v1-5
+      - DEVICE=cuda
+      - STUB_MODE=true  # Set to false for real GPU inference
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s  # Models take time to load
+    restart: unless-stopped
+
+# For development without GPU, use this alternative:
+# docker-compose -f docker-compose.yml -f docker-compose.stub.yml up

@@ -1,176 +1,264 @@
-# Watermarking Service
+# Watermark Service
 
-FastAPI service layer for the watermarking engine. This service provides a custodial API for watermark generation and detection.
+GPU-backed watermarking service for image generation and detection.
 
 ## Architecture
 
-The service layer wraps the existing watermarking engine in `src/` without modifying it:
+```
+┌─────────────────┐     HTTP      ┌─────────────────┐
+│                 │ ───────────▶  │                 │
+│   API Service   │               │   GPU Worker    │
+│   (CPU, Public) │  ◀───────────  │   (GPU, Private)│
+│                 │               │                 │
+└─────────────────┘               └─────────────────┘
+        │                                  │
+        │                                  │
+        ▼                                  ▼
+┌─────────────────┐               ┌─────────────────┐
+│  Key Store      │               │  SD Pipeline    │
+│  (JSON file)    │               │  + Watermark    │
+└─────────────────┘               └─────────────────┘
+```
 
-- **Key Custody**: Secret keys are generated and stored internally
-- **Minimal API**: Only exposes necessary endpoints
-- **Existing Engine**: Uses all existing strategies, detection pipelines, and algorithms from `src/`
+### API Service (Port 8000)
+- **Public-facing** endpoints for users
+- Key registration and management
+- Delegates heavy computation to GPU worker
+- Handles storage and business logic
+
+### GPU Worker (Port 8001)
+- **Internal only** - not user-facing
+- Image generation with watermark embedding
+- DDIM inversion for detection
+- Runs on GPU-enabled hardware
+
+## Quick Start
+
+### Local Development (Stub Mode)
+
+Run without GPU using stub implementations:
+
+```bash
+# Start API service
+cd service
+python -m service.api.main
+
+# In another terminal, start GPU worker (stub mode)
+STUB_MODE=true python -m service.gpu.main
+```
+
+### Docker Compose
+
+```bash
+# With GPU
+docker-compose -f service/docker-compose.yml up
+
+# Without GPU (stub mode)
+docker-compose -f service/docker-compose.yml -f service/docker-compose.stub.yml up
+```
 
 ## API Endpoints
 
-### POST `/api/v1/generate_seed`
+### Key Management
 
-Generate a watermark seed for client-side image generation.
+#### Register a new key
+```bash
+curl -X POST http://localhost:8000/keys/register \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
 
-**Request:**
+Response:
 ```json
 {
-  "model": "sdxl",
-  "num_images": 4
+  "key_id": "wm_abc123def4",
+  "fingerprint": "a1b2c3d4e5f6...",
+  "created_at": "2024-01-15T10:30:00Z"
 }
 ```
 
-**Response:**
+#### List all keys
+```bash
+curl http://localhost:8000/keys
+```
+
+### Image Generation
+
+```bash
+curl -X POST http://localhost:8000/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key_id": "wm_abc123def4",
+    "prompt": "a beautiful mountain landscape",
+    "seed": 42
+  }'
+```
+
+Response:
 ```json
 {
-  "watermark_id": "wm_xxxxx",
-  "seed_payload": "<opaque blob>"
+  "image_url": "./data/images/img_20240115_103000_abc12345.png",
+  "key_id": "wm_abc123def4",
+  "seed_used": 42,
+  "processing_time_ms": 5234.5
 }
 ```
 
-The `seed_payload` contains:
-- Random seed for noise generation
-- Key identifier (watermark_id)
-- Pre-computed watermarked initial latent (optional)
+### Watermark Detection
 
-### POST `/api/v1/detect`
+```bash
+# Using file upload
+curl -X POST http://localhost:8000/detect \
+  -F "key_id=wm_abc123def4" \
+  -F "image=@my_image.png"
 
-Detect watermark in provided images.
-
-**Request:**
-```json
-{
-  "watermark_id": "wm_xxxxx",
-  "images": ["<base64-encoded-image-1>", "<base64-encoded-image-2>"]
-}
+# Using base64
+curl -X POST http://localhost:8000/detect \
+  -F "key_id=wm_abc123def4" \
+  -F "image_base64=$(base64 -i my_image.png)"
 ```
 
-**Response:**
+Response:
 ```json
 {
   "detected": true,
-  "score": 0.65,
-  "n_eff": 2,
-  "confidence": 0.85
+  "confidence": 0.95,
+  "key_id": "wm_abc123def4",
+  "score": 3.45,
+  "threshold": 0.5,
+  "processing_time_ms": 2341.2
 }
 ```
 
-### GET `/api/v1/health`
-
-Health check endpoint.
-
-**Response:**
-```json
-{
-  "status": "ok"
-}
-```
-
-## Running the Service
-
-### Local Development
+### Health Check
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-pip install fastapi uvicorn[standard] cryptography python-multipart
-
-# Run service
-uvicorn service.app.main:app --host 0.0.0.0 --port 8000
-```
-
-### Docker
-
-```bash
-# Build image
-docker build -t watermarking-service -f service/Dockerfile .
-
-# Run container
-docker run -p 8000:8000 watermarking-service
+curl http://localhost:8000/health
 ```
 
 ## Configuration
 
-Runtime configuration is in `service/configs/runtime.yaml`. Key settings:
+### Environment Variables
 
-- `model.default_model_id`: Stable Diffusion model to use
-- `seed_bias.lambda_strength`: Watermark injection strength
-- `detection.threshold_high`: Detection threshold
-- `storage.key_db_path`: Path to key storage file
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `API_HOST` | `0.0.0.0` | API server bind address |
+| `API_PORT` | `8000` | API server port |
+| `API_DEBUG` | `false` | Enable debug mode |
+| `GPU_WORKER_URL` | `http://localhost:8001` | GPU worker URL |
+| `GPU_WORKER_TIMEOUT` | `120.0` | GPU request timeout (seconds) |
+| `STORAGE_BACKEND` | `local` | Storage backend: `local` or `gcs` |
+| `STORAGE_PATH` | `./data/images` | Local storage path |
+| `GCS_BUCKET` | - | GCS bucket name (if using GCS) |
+| `KEY_STORE_PATH` | `./data/keys.json` | Key store file path |
+| `ENCRYPTION_KEY` | - | Key encryption password |
 
-## Security Notes
+### GPU Worker Variables
 
-1. **Key Storage**: Keys are encrypted at rest using Fernet (symmetric encryption)
-2. **Key Generation**: Uses cryptographically secure random number generation
-3. **Rate Limiting**: `/detect` endpoint is rate-limited (50 requests/minute per IP)
-4. **Production**: Set `WATERMARK_ENCRYPTION_KEY` environment variable for key encryption
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GPU_HOST` | `0.0.0.0` | GPU worker bind address |
+| `GPU_PORT` | `8001` | GPU worker port |
+| `MODEL_ID` | `runwayml/stable-diffusion-v1-5` | HuggingFace model ID |
+| `DEVICE` | `cuda` | PyTorch device |
+| `STUB_MODE` | `true` | Use stub implementations |
 
-## Key Storage
+## Testing
 
-Watermark keys are stored in `service_data/watermark_keys.json` (configurable). Each record contains:
+### Smoke Test
 
-- `watermark_id`: Public identifier
-- `secret_key_encrypted`: Encrypted master key
-- `strategy`: Strategy type (e.g., "seed_bias")
-- `model`: Model identifier
-- `status`: "active" or "revoked"
-- `created_at`: Timestamp
+```bash
+./service/scripts/smoke_test.sh
 
-## Integration with Existing Engine
+# With verbose output
+VERBOSE=true ./service/scripts/smoke_test.sh
 
-The service uses existing modules from `src/`:
+# Custom API URL
+API_URL=http://localhost:8000 ./service/scripts/smoke_test.sh
+```
 
-- `src.engine.strategies.seed_bias.SeedBiasStrategy`: For watermark generation
-- `src.detection.pipeline.HybridDetector`: For watermark detection
-- `src.detection.prf.PRFKeyDerivation`: For key derivation
-- `src.algorithms.g_field.GFieldGenerator`: For G-field generation
+### Manual Testing
 
-**Important**: The service layer does NOT modify any code in `src/`. All watermark logic comes from the existing engine.
+```bash
+# 1. Register key
+KEY_ID=$(curl -s -X POST http://localhost:8000/keys/register | jq -r '.key_id')
+echo "Key: $KEY_ID"
 
-## Development
+# 2. Generate image
+curl -X POST http://localhost:8000/generate \
+  -H "Content-Type: application/json" \
+  -d "{\"key_id\": \"$KEY_ID\", \"prompt\": \"test image\"}"
 
-### Project Structure
+# 3. Detect watermark
+curl -X POST http://localhost:8000/detect \
+  -F "key_id=$KEY_ID" \
+  -F "image=@test.png"
+```
+
+## Directory Structure
 
 ```
 service/
-├── app/
+├── api/                     # Public API Service
 │   ├── main.py              # FastAPI entrypoint
-│   ├── routes/              # API routes
-│   │   ├── generate_seed.py
-│   │   ├── detect.py
-│   │   └── health.py
-│   ├── schemas.py           # Pydantic schemas
-│   ├── dependencies.py      # Shared dependencies
-│   └── middleware.py        # Rate limiting
-├── infra/
-│   ├── db.py                # Key storage
-│   └── security.py          # Key encryption
-├── configs/
-│   └── runtime.yaml         # Runtime config
-├── Dockerfile
+│   ├── routes.py            # API endpoints
+│   ├── schemas.py           # Pydantic models
+│   ├── config.py            # Configuration
+│   ├── authority.py         # Key management
+│   ├── detector.py          # Detection logic
+│   ├── artifacts.py         # Artifact loading
+│   ├── key_store.py         # Key persistence
+│   ├── gpu_client.py        # GPU worker client
+│   ├── storage.py           # Storage abstraction
+│   └── static/demo.html     # Demo UI
+│
+├── gpu/                     # GPU Worker (Private)
+│   ├── main.py              # FastAPI entrypoint
+│   ├── pipeline.py          # SD + watermark ops
+│   ├── schemas.py           # Request models
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── docker/
+│   ├── api.Dockerfile
+│   └── gpu.Dockerfile
+│
+├── scripts/
+│   ├── smoke_test.sh
+│   └── deploy_gpu_gcp.sh
+│
+├── data/
+│   ├── keys.json            # Key persistence
+│   └── artifacts/           # Model artifacts
+│
+├── docker-compose.yml
+├── docker-compose.stub.yml
+├── .env.example
 └── README.md
 ```
 
-### Testing
+## Security Notes
 
-```bash
-# Test health endpoint
-curl http://localhost:8000/api/v1/health
+1. **Master keys** never leave the API service boundary
+2. GPU workers only receive **derived keys** scoped to specific operations
+3. Key fingerprints are used for cache keying and audit trails
+4. The encryption key should be set via environment variable in production
 
-# Test generate_seed
-curl -X POST http://localhost:8000/api/v1/generate_seed \
-  -H "Content-Type: application/json" \
-  -d '{"model": "sdxl", "num_images": 1}'
+## Demo UI
+
+A simple demo UI is available at:
+```
+http://localhost:8000/demo
 ```
 
-## Notes
+Features:
+- Register new keys
+- Generate watermarked images
+- Upload and detect watermarks
+- Health status monitoring
 
-- The service is stateless except for key storage
-- Pipeline is loaded once at startup (singleton)
-- Detection uses the existing hybrid detection pipeline
-- Rate limiting is applied to `/detect` endpoint only
+## API Documentation
 
+Interactive API documentation available at:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`

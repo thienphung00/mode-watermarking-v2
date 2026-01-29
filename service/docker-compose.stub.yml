@@ -1,0 +1,25 @@
+# Docker Compose override for stub mode (no GPU required)
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.stub.yml up
+
+version: '3.8'
+
+services:
+  gpu:
+    build:
+      context: ..
+      dockerfile: service/docker/api.Dockerfile  # Use lighter image
+    environment:
+      - GPU_HOST=0.0.0.0
+      - GPU_PORT=8001
+      - STUB_MODE=true
+    command: ["python", "-m", "service.gpu.main"]
+    deploy:
+      resources:
+        reservations:
+          devices: []  # No GPU needed
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
