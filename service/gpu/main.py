@@ -115,7 +115,8 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
     """
     Generate watermarked image.
     
-    SECURITY: Only accepts derived_key (never master_key).
+    ARCHITECTURAL REQUIREMENT: Uses master_key only.
+    derived_key is NOT used - key_id is a public PRF index.
     """
     global pipeline
     
@@ -127,7 +128,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
     try:
         result = pipeline.generate(
             prompt=request.prompt,
-            derived_key=request.derived_key,
+            master_key=request.master_key,
             key_id=request.key_id,
             seed=request.seed,
             num_inference_steps=request.num_inference_steps,
@@ -174,7 +175,9 @@ async def reverse_ddim(request: ReverseDDIMRequest) -> ReverseDDIMResponse:
     """
     Perform DDIM inversion and detect watermark.
     
-    NOTE: Accepts master_key for compute_g_values() to match training pipeline.
+    ARCHITECTURAL REQUIREMENT: Uses master_key only.
+    derived_key is NOT used - key_id is a public PRF index.
+    compute_g_values() uses (master_key, key_id) directly.
     """
     global pipeline
     
@@ -187,10 +190,9 @@ async def reverse_ddim(request: ReverseDDIMRequest) -> ReverseDDIMResponse:
         # Decode image
         image_bytes = base64.b64decode(request.image_base64)
         
-        # Run detection (master_key required for canonical g-value computation)
+        # Run detection with master_key only
         result = pipeline.invert_and_detect(
             image_bytes=image_bytes,
-            derived_key=request.derived_key,
             master_key=request.master_key,
             key_id=request.key_id,
             g_field_config=request.g_field_config,

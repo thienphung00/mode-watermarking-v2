@@ -14,10 +14,14 @@ from pydantic import BaseModel, Field
 
 
 class GenerateRequest(BaseModel):
-    """Request for image generation."""
+    """Request for image generation.
     
-    key_id: str = Field(..., description="Key identifier")
-    derived_key: str = Field(..., description="Derived key for watermarking (NOT master key)")
+    ARCHITECTURAL REQUIREMENT: Uses master_key only.
+    derived_key is NOT used - key_id is a public PRF index.
+    """
+    
+    key_id: str = Field(..., description="Key identifier (public PRF index)")
+    master_key: str = Field(..., description="Master key for watermark embedding")
     key_fingerprint: str = Field(..., description="Key fingerprint for validation")
     
     prompt: str = Field(default="a beautiful landscape", description="Text prompt")
@@ -50,11 +54,15 @@ class GenerateResponse(BaseModel):
 
 
 class ReverseDDIMRequest(BaseModel):
-    """Request for DDIM inversion (detection)."""
+    """Request for DDIM inversion (detection).
     
-    key_id: str = Field(..., description="Key identifier")
-    derived_key: str = Field(..., description="Derived key for detection (backward compat)")
-    master_key: str = Field(..., description="Master key for compute_g_values (required)")
+    ARCHITECTURAL REQUIREMENT: Uses master_key only.
+    derived_key is NOT used - key_id is a public PRF index.
+    compute_g_values() uses (master_key, key_id) directly.
+    """
+    
+    key_id: str = Field(..., description="Key identifier (public PRF index)")
+    master_key: str = Field(..., description="Master key for g-value computation")
     key_fingerprint: str = Field(..., description="Key fingerprint for validation")
     
     image_base64: str = Field(..., description="Base64-encoded image to analyze")

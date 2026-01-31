@@ -134,7 +134,7 @@ class GPUPipeline:
     def generate(
         self,
         prompt: str,
-        derived_key: str,
+        master_key: str,
         key_id: str,
         seed: Optional[int] = None,
         num_inference_steps: int = 50,
@@ -146,10 +146,13 @@ class GPUPipeline:
         """
         Generate watermarked image.
         
+        ARCHITECTURAL REQUIREMENT: Uses master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
+        
         Args:
             prompt: Text prompt
-            derived_key: Scoped derived key (NOT master key)
-            key_id: Key identifier
+            master_key: Master key for watermark embedding
+            key_id: Key identifier (public PRF index)
             seed: Random seed
             num_inference_steps: Diffusion steps
             guidance_scale: CFG scale
@@ -173,7 +176,7 @@ class GPUPipeline:
         
         return self._generate_full(
             prompt=prompt,
-            derived_key=derived_key,
+            master_key=master_key,
             key_id=key_id,
             seed=seed,
             num_inference_steps=num_inference_steps,
@@ -229,7 +232,7 @@ class GPUPipeline:
     def _generate_full(
         self,
         prompt: str,
-        derived_key: str,
+        master_key: str,
         key_id: str,
         seed: int,
         num_inference_steps: int,
@@ -238,36 +241,32 @@ class GPUPipeline:
         height: int,
         embedding_config: Dict[str, Any],
     ) -> GenerationResult:
-        """Generate image using full SD pipeline with watermark."""
+        """Generate image using full SD pipeline with watermark.
+        
+        ARCHITECTURAL REQUIREMENT: Uses master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
+        """
         import torch
         
         # Import watermarking components from src
         from src.core.config import SeedBiasConfig
         from src.engine.strategies.seed_bias import SeedBiasStrategy
         
-<<<<<<< HEAD
-	
-=======
+
         # Create SeedBiasConfig from embedding_config
->>>>>>> 9937f72 (Fix detection pipeline: use BayesianDetector, canonical g-values, align keys, GPU runtime fixes)
         seed_bias_config = SeedBiasConfig(
             lambda_strength=embedding_config.get("lambda_strength", 0.05),
             domain=embedding_config.get("domain", "frequency"),
             low_freq_cutoff=embedding_config.get("low_freq_cutoff", 0.05),
             high_freq_cutoff=embedding_config.get("high_freq_cutoff", 0.4),
         )
-        
-<<<<<<< HEAD
-	# Compute latent shape from image dimensions
-=======
-        # Compute latent shape from image dimensions
->>>>>>> 9937f72 (Fix detection pipeline: use BayesianDetector, canonical g-values, align keys, GPU runtime fixes)
+
         latent_shape = (4, height // 8, width // 8)
         
-        # Create watermark strategy with new constructor API
+        # Create watermark strategy with master_key (not derived_key)
         strategy = SeedBiasStrategy(
             config=seed_bias_config,
-            master_key=derived_key,
+            master_key=master_key,
             latent_shape=latent_shape,
             device=self.device,
         )
@@ -279,11 +278,7 @@ class GPUPipeline:
             seed=seed,
             key_id=key_id,
         )
-<<<<<<< HEAD
 
-=======
-        
->>>>>>> 9937f72 (Fix detection pipeline: use BayesianDetector, canonical g-values, align keys, GPU runtime fixes)
         # Set seed
         generator = torch.Generator(device=self.device).manual_seed(seed)
         
@@ -316,7 +311,6 @@ class GPUPipeline:
     def invert_and_detect(
         self,
         image_bytes: bytes,
-        derived_key: str,
         master_key: str,
         key_id: str,
         g_field_config: Optional[Dict[str, Any]] = None,
@@ -326,11 +320,14 @@ class GPUPipeline:
         """
         Perform DDIM inversion and detect watermark.
         
+        ARCHITECTURAL REQUIREMENT: Uses master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
+        compute_g_values() uses (master_key, key_id) directly.
+        
         Args:
             image_bytes: Raw image bytes
-            derived_key: Scoped derived key (for backward compat)
-            master_key: Master key (required for compute_g_values)
-            key_id: Key identifier
+            master_key: Master key for g-value computation
+            key_id: Key identifier (public PRF index)
             g_field_config: G-field configuration
             detection_config: Detection parameters
             inversion_config: DDIM inversion parameters
@@ -396,10 +393,13 @@ class GPUPipeline:
         """
         Perform full DDIM inversion and detection using canonical BayesianDetector.
         
+        ARCHITECTURAL REQUIREMENT: Uses master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
+        
         This method matches the canonical training/evaluation pipeline exactly:
         - Uses compute_g_values() from src/detection/g_values
         - Uses BayesianDetector from src/models/detectors
-        - Uses master_key (NOT derived_key) for g-value computation
+        - compute_g_values() uses (master_key, key_id) directly
         """
         import torch
         from PIL import Image
@@ -452,11 +452,11 @@ class GPUPipeline:
         logger.info(f"Inverted latent shape: {z_T.shape}")
         
         # Compute g-values using canonical function (matches training pipeline)
-        # CRITICAL: Use master_key, NOT derived_key
+        # Uses (master_key, key_id) - derived_key is NOT used
         g, mask = compute_g_values(
             x0=z_T,  # Inverted latent tensor [1, 4, 64, 64]
-            key=key_id,  # key_id string
-            master_key=master_key,  # Must be master_key, NOT derived_key
+            key=key_id,  # key_id is the public PRF index
+            master_key=master_key,  # master_key is the cryptographic secret
             return_mask=True,
             g_field_config=g_field_config,  # From detection_config
             latent_type="zT",  # We're working with inverted latent

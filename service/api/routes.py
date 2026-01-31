@@ -33,7 +33,6 @@ from service.api.schemas import (
 )
 from service.api.key_store import get_key_store
 from service.api.authority import get_authority
-from service.api.detector import get_detector, get_stub_detector
 from service.api.gpu_client import get_gpu_client, GPUClientError, GPUClientConnectionError
 from service.api.storage import get_storage
 from service.api.generation_store import get_generation_store
@@ -116,7 +115,8 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
     The watermark is embedded during the diffusion process and
     is invisible to human observers but detectable by the API.
     
-    Note: If GPU worker is unavailable, returns a stub response.
+    FAIL-CLOSED: If GPU worker is unavailable, returns HTTP 503.
+    No stub responses or fallback behavior.
     """
     start_time = time.time()
     request_id = str(uuid.uuid4())
@@ -126,7 +126,7 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
     if not authority.validate_key(request.key_id):
         raise HTTPException(status_code=400, detail=f"Invalid or inactive key: {request.key_id}")
     
-    # Get generation payload (with derived key)
+    # Get generation payload (master_key only)
     try:
         payload = authority.get_generation_payload(
             key_id=request.key_id,
@@ -135,15 +135,15 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    # Try GPU worker, fall back to stub
+    # Call GPU worker - fail closed on any error
     gpu_client = get_gpu_client()
     storage = get_storage()
     
     try:
-        # Call GPU worker
+        # Call GPU worker with master_key (not derived_key)
         response = await gpu_client.generate(
             key_id=request.key_id,
-            derived_key=payload["derived_key"],
+            master_key=payload["master_key"],
             key_fingerprint=payload["key_fingerprint"],
             prompt=request.prompt,
             request_id=request_id,
@@ -183,23 +183,10 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
             processing_time_ms=processing_time_ms,
         )
         
-    except GPUClientConnectionError:
-        # GPU worker not available - return stub response
-        logger.warning("GPU worker unavailable, returning stub response")
-        
-        import random
-        seed_used = request.seed if request.seed else random.randint(0, 2**31 - 1)
-        
-        # Create a stub image path
-        stub_path = f"stub_image_{request_id}.png"
-        processing_time_ms = (time.time() - start_time) * 1000
-        
-        return GenerateResponse(
-            image_url=f"[STUB] {stub_path}",
-            key_id=request.key_id,
-            seed_used=seed_used,
-            processing_time_ms=processing_time_ms,
-        )
+    except GPUClientConnectionError as e:
+        # FAIL-CLOSED: GPU unavailable is a hard failure
+        logger.error(f"GPU worker unavailable: {e}")
+        raise HTTPException(status_code=503, detail="GPU service unavailable")
         
     except GPUClientError as e:
         logger.error(f"GPU generation failed: {e}")
@@ -235,7 +222,8 @@ async def detect_watermark(
     
     Returns detection result with confidence score.
     
-    Note: If GPU worker is unavailable, returns a stub response.
+    FAIL-CLOSED: If GPU worker is unavailable, returns HTTP 503.
+    No stub responses or fallback behavior.
     """
     start_time = time.time()
     request_id = str(uuid.uuid4())
@@ -254,7 +242,7 @@ async def detect_watermark(
     else:
         raise HTTPException(status_code=400, detail="No image provided")
     
-    # Get detection payload
+    # Get detection payload (master_key only)
     try:
         payload = authority.get_detection_payload(
             key_id=key_id,
@@ -263,14 +251,13 @@ async def detect_watermark(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    # Try GPU worker, fall back to stub
+    # Call GPU worker - fail closed on any error
     gpu_client = get_gpu_client()
     
     try:
-        # Call GPU worker
+        # Call GPU worker with master_key only (no derived_key)
         response = await gpu_client.detect(
             key_id=key_id,
-            derived_key=payload["derived_key"],
             master_key=payload["master_key"],
             key_fingerprint=payload["key_fingerprint"],
             image_base64=image_b64,
@@ -293,25 +280,10 @@ async def detect_watermark(
             log_odds=response.log_odds,
         )
         
-    except GPUClientConnectionError:
-        # GPU worker not available - use stub detector
-        logger.warning("GPU worker unavailable, using stub detector")
-        
-        stub_detector = get_stub_detector()
-        result = stub_detector.detect_stub(key_id, simulate_watermarked=True)
-        
-        processing_time_ms = (time.time() - start_time) * 1000
-        
-        return DetectResponse(
-            detected=result.detected,
-            confidence=result.confidence,
-            key_id=key_id,
-            score=result.score,
-            threshold=result.threshold,
-            processing_time_ms=processing_time_ms,
-            posterior=result.posterior,
-            log_odds=result.log_odds,
-        )
+    except GPUClientConnectionError as e:
+        # FAIL-CLOSED: GPU unavailable is a hard failure
+        logger.error(f"GPU worker unavailable: {e}")
+        raise HTTPException(status_code=503, detail="GPU service unavailable")
         
     except GPUClientError as e:
         logger.error(f"GPU detection failed: {e}")
@@ -337,15 +309,17 @@ async def health_check() -> HealthResponse:
     - Service status
     - GPU worker connectivity
     - Number of registered keys
+    
+    Note: If GPU worker is not connected, status is "unhealthy"
+    because the service cannot generate or detect watermarks without GPU.
     """
     key_store = get_key_store()
     gpu_client = get_gpu_client()
     
     gpu_connected = await gpu_client.is_connected()
     
-    status = "healthy"
-    if not gpu_connected:
-        status = "degraded"  # Can still work with stubs
+    # FAIL-CLOSED: GPU required for all watermark operations
+    status = "healthy" if gpu_connected else "unhealthy"
     
     return HealthResponse(
         status=status,

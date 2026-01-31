@@ -56,7 +56,7 @@ This separation allows:
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
                                  │ Internal HTTP (port 8001)
-                                 │ (derived keys only - never master keys)
+                                 │ (derived keys for generation; master keys for detection)
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         GPU Worker (CUDA)                           │
@@ -88,6 +88,7 @@ service/
 │   ├── detector.py              # Detection logic wrapper
 │   ├── artifacts.py             # Model artifact loader
 │   ├── key_store.py             # Persistent key registry (JSON)
+│   ├── generation_store.py      # Generation record persistence (JSON)
 │   ├── gpu_client.py            # HTTP client for GPU worker
 │   ├── storage.py               # Image storage abstraction
 │   └── static/
@@ -124,8 +125,9 @@ The API service is the **public-facing** component that handles all external req
 #### Core Responsibilities:
 - **Key Management**: Registration, validation, listing, revocation
 - **Request Routing**: Delegates heavy work to GPU worker
-- **Security Enforcement**: Master keys never leave this boundary
+- **Security Enforcement**: Master keys stay within API for generation; passed to GPU only for detection (required by g-value computation)
 - **Storage Management**: Image persistence (local or GCS)
+- **Generation Tracking**: Records all generations for audit
 - **Health Monitoring**: Service status and GPU connectivity
 
 #### Key Files:
@@ -135,8 +137,9 @@ The API service is the **public-facing** component that handles all external req
 | `main.py` | FastAPI app creation | `create_app()`, `lifespan()` |
 | `routes.py` | REST endpoints | `register_key()`, `generate_image()`, `detect_watermark()` |
 | `schemas.py` | Data validation | Request/Response Pydantic models |
-| `authority.py` | Key security | `derive_scoped_key()`, `get_generation_payload()` |
+| `authority.py` | Key security | `derive_scoped_key()`, `get_generation_payload()`, `get_detection_payload()` |
 | `key_store.py` | Key persistence | `register_key()`, `get_master_key()`, `revoke_key()` |
+| `generation_store.py` | Generation records | `record_generation()`, `get_records_by_key()` |
 | `gpu_client.py` | GPU communication | `generate()`, `detect()`, `health()` |
 | `detector.py` | Detection logic | `detect_from_score()`, `StubDetector` |
 | `storage.py` | Image storage | `LocalStorage`, `GCSStorage` |
@@ -167,8 +170,12 @@ The GPU worker handles **compute-intensive operations** that require GPU acceler
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| **Full Mode** | Uses actual SD pipeline | Production with GPU |
-| **Stub Mode** | Returns mock data | Testing, CI/CD, development |
+| **Full Mode** | Uses actual SD pipeline, `SeedBiasStrategy`, `BayesianDetector` | Production with GPU |
+| **Stub Mode** | Returns deterministic mock data based on input hashes | Testing, CI/CD, development |
+
+Stub mode generates:
+- Images: Colored noise based on prompt hash and seed
+- Detection: Deterministic results based on image hash + key_id (70% chance of "detected")
 
 ---
 
@@ -260,13 +267,16 @@ Each endpoint includes:
 
 **Public API Models:**
 - `KeyRegisterRequest/Response` - Key registration
-- `GenerateRequest/Response` - Image generation
-- `DetectRequest/Response` - Watermark detection
+- `KeyInfo`, `KeyListResponse` - Key listing
+- `GenerateRequest/Response` - Image generation (with inference params)
+- `DetectRequest/Response` - Watermark detection (with posterior, log_odds)
 - `HealthResponse` - Service health
+- `ErrorResponse` - Standard error format
 
 **Internal GPU Models:**
 - `GPUGenerateRequest/Response` - GPU generation calls
-- `GPUDetectRequest/Response` - GPU detection calls
+- `GPUDetectRequest/Response` - GPU detection calls (includes master_key)
+- `GPUHealthResponse` - GPU worker health
 
 ---
 
@@ -288,9 +298,15 @@ class Config:
     # Storage
     storage_backend: str = "local"  # "local" or "gcs"
     storage_path: str = "./data/images"
+    gcs_bucket: Optional[str] = None
     
     # Key Store
     key_store_path: str = "./data/keys.json"
+    
+    # Artifacts (for detection)
+    artifacts_path: str = "./data/artifacts"
+    likelihood_params_path: Optional[str] = None
+    mask_path: Optional[str] = None
     
     # Security
     encryption_key: str = "development-key-not-for-production"
@@ -307,16 +323,19 @@ The Authority manages the **security boundary** between API and GPU:
 def derive_scoped_key(master_key, key_id, operation, request_id):
     """
     SECURITY: Creates operation-specific derived keys
-    - Master key NEVER leaves API boundary
+    - Master key NEVER leaves API boundary (except for detection - see note)
     - Derived keys are scoped to generation OR detection
     - Uses HKDF-like construction with HMAC-SHA256
     """
 ```
 
+**Note**: For detection, the `master_key` is now passed to the GPU worker because `compute_g_values()` requires it to match the training pipeline exactly.
+
 Default configurations managed:
-- `DEFAULT_EMBEDDING_CONFIG` - Watermark embedding parameters
-- `DEFAULT_G_FIELD_CONFIG` - G-field for detection
-- `DEFAULT_DETECTION_CONFIG` - Bayesian detection settings
+- `DEFAULT_EMBEDDING_CONFIG` - Watermark embedding parameters (lambda_strength, domain, freq cutoffs)
+- `DEFAULT_G_FIELD_CONFIG` - G-field for detection (mapping_mode, frequency settings)
+- `DEFAULT_DETECTION_CONFIG` - Bayesian detection settings (threshold, prior)
+- `DEFAULT_INVERSION_CONFIG` - DDIM inversion parameters (num_inference_steps, guidance_scale)
 
 ---
 
@@ -340,6 +359,41 @@ Operations:
 - `get_master_key()` - Retrieves secret (internal use only)
 - `revoke_key()` - Deactivates key
 - `list_keys()` - Returns public key info (no secrets)
+
+---
+
+### `/api/generation_store.py`
+**Generation Record Persistence**
+
+Lightweight JSON-based storage for generation records:
+
+```python
+class GenerationStore:
+    def record_generation(key_id, filename, seed_used, processing_time_ms):
+        """Record a successful generation."""
+    
+    def get_records_by_key(key_id) -> List[Dict]:
+        """Get all generation records for a key."""
+    
+    def count() -> int:
+        """Get total number of generation records."""
+```
+
+Record structure:
+```json
+{
+  "key_id": "wm_abc123def4",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "filename": "20240115_103000_abc123.png",
+  "seed_used": 42,
+  "processing_time_ms": 1234.5
+}
+```
+
+Features:
+- Non-blocking and failure-tolerant (logs errors only)
+- Stored alongside `keys.json` in the data directory
+- Global instance via `get_generation_store()`
 
 ---
 
@@ -379,9 +433,16 @@ class Detector:
         """Bayesian inference from S-statistic"""
         # Computes posterior probability
         # Uses likelihood ratio from normal approximation
+    
+    def detect_from_gpu_response(gpu_response) -> DetectionResult:
+        """Create DetectionResult from GPU worker response"""
+
+class StubDetector(Detector):
+    def detect_stub(key_id, simulate_watermarked) -> DetectionResult:
+        """Generate deterministic stub result based on key_id hash"""
 ```
 
-`StubDetector` provides deterministic mock results for testing.
+`StubDetector` provides deterministic mock results for testing when GPU worker is unavailable.
 
 ---
 
@@ -421,11 +482,13 @@ Features:
 Endpoints:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/infer/generate` | POST | Generate watermarked image |
-| `/infer/reverse_ddim` | POST | DDIM inversion + detection |
-| `/health` | GET | Detailed health metrics |
-| `/ready` | GET | Kubernetes readiness probe |
+| `/infer/generate` | POST | Generate watermarked image (accepts derived_key only) |
+| `/infer/reverse_ddim` | POST | DDIM inversion + detection (accepts master_key for g-values) |
+| `/health` | GET | Detailed health metrics (internal - protect in production) |
+| `/ready` | GET | Kubernetes readiness probe (safe for external probes) |
 | `/live` | GET | Kubernetes liveness probe |
+
+**Note**: The `/infer/reverse_ddim` endpoint now requires `master_key` to compute g-values that match the training pipeline exactly.
 
 ---
 
@@ -434,16 +497,23 @@ Endpoints:
 
 ```python
 class GPUPipeline:
-    def generate(prompt, derived_key, ...) -> GenerationResult:
-        """Generate image with embedded watermark"""
+    def generate(prompt, derived_key, key_id, ...) -> GenerationResult:
+        """Generate image with embedded watermark using SeedBiasStrategy"""
     
-    def invert_and_detect(image_bytes, derived_key, ...) -> DetectionResult:
-        """DDIM inversion and watermark detection"""
+    def invert_and_detect(image_bytes, derived_key, master_key, key_id, ...) -> DetectionResult:
+        """DDIM inversion and watermark detection using BayesianDetector"""
 ```
 
 Two modes:
-- **Stub Mode**: Fast mock responses for testing
-- **Full Mode**: Actual SD pipeline with diffusers
+- **Stub Mode**: Fast mock responses for testing (deterministic based on input hashes)
+- **Full Mode**: Actual SD pipeline with diffusers, uses canonical detection from `/src`
+
+Full mode detection flow:
+1. Load image and create `DDIMInverter`
+2. Invert to latent `z_T`
+3. Compute g-values using `compute_g_values(master_key, key_id, ...)`
+4. Apply mask and binarize
+5. Run `BayesianDetector.score()` for log_odds and posterior
 
 ---
 
@@ -451,9 +521,11 @@ Two modes:
 **Internal Request/Response Models**
 
 Models for GPU-API communication:
-- `GenerateRequest/Response`
-- `ReverseDDIMRequest/Response`
-- `HealthResponse`, `ReadyResponse`
+- `GenerateRequest/Response` - Generation with embedding_config
+- `ReverseDDIMRequest/Response` - Detection with master_key, g_field_config, detection_config, inversion_config
+- `HealthResponse` - Detailed health with GPU memory stats
+- `ReadyResponse` - Kubernetes readiness probe response
+- `ErrorResponse` - Error format
 
 ---
 
@@ -462,7 +534,7 @@ Models for GPU-API communication:
 ### Image Generation Flow
 
 ```
-1. Client → POST /generate {key_id, prompt, seed}
+1. Client → POST /generate {key_id, prompt, seed, num_inference_steps, guidance_scale, width, height}
    
 2. API validates key_id via KeyStore
    
@@ -470,18 +542,21 @@ Models for GPU-API communication:
    derived_key = HKDF(master_key, "generation", key_id)
    
 4. API → GPU Worker: POST /infer/generate
-   {derived_key, prompt, seed, embedding_config}
+   {derived_key, key_id, prompt, seed, embedding_config, ...}
    
 5. GPU Pipeline:
    a. Load/create SD pipeline
-   b. Generate latents with watermark bias
-   c. Decode to image
+   b. Create SeedBiasStrategy with embedding_config
+   c. Generate latents with watermark bias
+   d. Decode to image
    
-6. GPU → API: {image_base64, seed_used}
+6. GPU → API: {image_base64, seed_used, processing_time_ms}
    
 7. API saves image via Storage
    
-8. Client ← {image_url, key_id, seed_used}
+8. API records generation via GenerationStore (non-blocking)
+   
+9. Client ← {image_url, key_id, seed_used, processing_time_ms}
 ```
 
 ### Detection Flow
@@ -491,21 +566,22 @@ Models for GPU-API communication:
    
 2. API validates key_id
    
-3. Authority derives detection key:
-   derived_key = HKDF(master_key, "detection", key_id)
+3. Authority prepares detection payload:
+   - derived_key = HKDF(master_key, "detection", key_id)
+   - master_key (required for compute_g_values() to match training)
    
 4. API → GPU Worker: POST /infer/reverse_ddim
-   {derived_key, image_base64, g_field_config, detection_config}
+   {master_key, derived_key, image_base64, g_field_config, detection_config, inversion_config}
    
 5. GPU Pipeline:
-   a. DDIM inversion → recover latents
-   b. Compute G-values
-   c. Statistical test → score
-   d. Bayesian inference → posterior
+   a. DDIM inversion → recover latents (z_T)
+   b. Compute G-values using master_key
+   c. Apply mask and binarize g-values
+   d. Run BayesianDetector → log_odds, posterior
    
-6. GPU → API: {detected, score, confidence, posterior}
+6. GPU → API: {detected, score, confidence, posterior, log_odds}
    
-7. Client ← {detected, confidence, score}
+7. Client ← {detected, confidence, score, posterior, log_odds}
 ```
 
 ---
@@ -528,11 +604,12 @@ Master Key (256-bit)
 
 | Property | Implementation |
 |----------|----------------|
-| **Key Isolation** | Master keys never leave API boundary |
+| **Key Isolation** | Master keys stay within API boundary for generation; passed to GPU only for detection (required by `compute_g_values()`) |
 | **Operation Scoping** | Derived keys are operation-specific |
 | **Forward Secrecy** | Request ID included in key derivation |
 | **Auditability** | Fingerprints enable tracing without exposing secrets |
 | **Revocation** | Keys can be deactivated without deletion |
+| **Internal Network** | GPU worker should only be accessible via internal network |
 
 ---
 
@@ -553,6 +630,9 @@ Master Key (256-bit)
 | `STORAGE_PATH` | `./data/images` | Local storage path |
 | `GCS_BUCKET` | - | GCS bucket (if using gcs) |
 | `KEY_STORE_PATH` | `./data/keys.json` | Key store location |
+| `ARTIFACTS_PATH` | `./data/artifacts` | Artifacts directory |
+| `LIKELIHOOD_PARAMS_PATH` | - | Path to trained likelihood params (required for Bayesian detection) |
+| `MASK_PATH` | - | Path to detection mask |
 | `ENCRYPTION_KEY` | `development-key-...` | Key encryption (change in prod!) |
 
 #### GPU Worker

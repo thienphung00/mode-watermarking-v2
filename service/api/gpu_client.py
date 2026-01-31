@@ -86,7 +86,7 @@ class GPUClient:
     async def generate(
         self,
         key_id: str,
-        derived_key: str,
+        master_key: str,
         key_fingerprint: str,
         prompt: str,
         request_id: str,
@@ -100,9 +100,12 @@ class GPUClient:
         """
         Request image generation from GPU worker.
         
+        ARCHITECTURAL REQUIREMENT: Uses master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
+        
         Args:
-            key_id: Key identifier
-            derived_key: Scoped derived key (NOT master key)
+            key_id: Key identifier (public PRF index)
+            master_key: Master key for watermark generation
             key_fingerprint: Key fingerprint for validation
             prompt: Text prompt
             request_id: Request ID for tracing
@@ -121,7 +124,7 @@ class GPUClient:
         """
         request = GPUGenerateRequest(
             key_id=key_id,
-            derived_key=derived_key,
+            master_key=master_key,
             key_fingerprint=key_fingerprint,
             prompt=prompt,
             seed=seed,
@@ -160,7 +163,6 @@ class GPUClient:
     async def detect(
         self,
         key_id: str,
-        derived_key: str,
         master_key: str,
         key_fingerprint: str,
         image_base64: str,
@@ -172,10 +174,12 @@ class GPUClient:
         """
         Request detection (DDIM inversion) from GPU worker.
         
+        ARCHITECTURAL REQUIREMENT: Uses master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
+        
         Args:
-            key_id: Key identifier
-            derived_key: Scoped derived key (for backward compat)
-            master_key: Master key (required for compute_g_values)
+            key_id: Key identifier (public PRF index)
+            master_key: Master key for g-value computation
             key_fingerprint: Key fingerprint for validation
             image_base64: Base64-encoded image
             request_id: Request ID for tracing
@@ -191,7 +195,6 @@ class GPUClient:
         """
         request = GPUDetectRequest(
             key_id=key_id,
-            derived_key=derived_key,
             master_key=master_key,
             key_fingerprint=key_fingerprint,
             image_base64=image_base64,

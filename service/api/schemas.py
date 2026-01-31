@@ -158,10 +158,14 @@ class HealthResponse(BaseModel):
 
 
 class GPUGenerateRequest(BaseModel):
-    """Internal request to GPU worker for generation."""
+    """Internal request to GPU worker for generation.
+    
+    ARCHITECTURAL REQUIREMENT: Uses master_key only.
+    derived_key is NOT used - key_id is a public PRF index.
+    """
     
     key_id: str
-    derived_key: str
+    master_key: str  # Master key for watermark embedding
     key_fingerprint: str
     prompt: str
     seed: Optional[int] = None
@@ -184,11 +188,15 @@ class GPUGenerateResponse(BaseModel):
 
 
 class GPUDetectRequest(BaseModel):
-    """Internal request to GPU worker for detection."""
+    """Internal request to GPU worker for detection.
+    
+    ARCHITECTURAL REQUIREMENT: Uses master_key only.
+    derived_key is NOT used - key_id is a public PRF index.
+    compute_g_values() uses (master_key, key_id) directly.
+    """
     
     key_id: str
-    derived_key: str
-    master_key: str  # Required for canonical g-value computation
+    master_key: str  # Master key for g-value computation
     key_fingerprint: str
     image_base64: str
     g_field_config: Dict[str, Any]

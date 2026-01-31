@@ -166,14 +166,15 @@ class Authority:
         """
         Get payload for generation request to GPU worker.
         
-        SECURITY: Returns derived_key, never master_key.
+        ARCHITECTURAL REQUIREMENT: Returns master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
         
         Args:
-            key_id: Key identifier
+            key_id: Key identifier (public PRF index)
             request_id: Request ID for tracing
             
         Returns:
-            Dictionary with derived_key, fingerprint, embedding_config
+            Dictionary with master_key, key_id, fingerprint, embedding_config
             
         Raises:
             ValueError: If key not found or inactive
@@ -183,16 +184,10 @@ class Authority:
             raise ValueError(f"Key {key_id} not found or inactive")
         
         fingerprint = self.key_store.get_fingerprint(key_id)
-        derived_key = derive_scoped_key(
-            master_key=master_key,
-            key_id=key_id,
-            operation=OperationType.GENERATION,
-            request_id=request_id,
-        )
         
         return {
             "key_id": key_id,
-            "derived_key": derived_key,
+            "master_key": master_key,
             "key_fingerprint": fingerprint,
             "embedding_config": self.DEFAULT_EMBEDDING_CONFIG.copy(),
         }
@@ -211,16 +206,16 @@ class Authority:
         """
         Get payload for detection request to GPU worker.
         
-        NOTE: For detection, master_key is now passed to GPU worker.
-        This is required because compute_g_values() needs the master_key
-        to compute g-values that match the training pipeline exactly.
+        ARCHITECTURAL REQUIREMENT: Returns master_key only.
+        derived_key is NOT used - key_id is a public PRF index.
+        compute_g_values() uses (master_key, key_id) directly.
         
         Args:
-            key_id: Key identifier
+            key_id: Key identifier (public PRF index)
             request_id: Request ID for tracing
             
         Returns:
-            Dictionary with master_key, derived_key, fingerprint, detection configs
+            Dictionary with master_key, key_id, fingerprint, detection configs
             
         Raises:
             ValueError: If key not found or inactive
@@ -230,12 +225,6 @@ class Authority:
             raise ValueError(f"Key {key_id} not found or inactive")
         
         fingerprint = self.key_store.get_fingerprint(key_id)
-        derived_key = derive_scoped_key(
-            master_key=master_key,
-            key_id=key_id,
-            operation=OperationType.DETECTION,
-            request_id=request_id,
-        )
         
         # Build detection config with likelihood params path (not the params themselves)
         detection_config = self.DEFAULT_DETECTION_CONFIG.copy()
@@ -245,8 +234,7 @@ class Authority:
         
         return {
             "key_id": key_id,
-            "master_key": master_key,  # Required for compute_g_values() to match training
-            "derived_key": derived_key,  # Keep for backward compat
+            "master_key": master_key,
             "key_fingerprint": fingerprint,
             "g_field_config": self.DEFAULT_G_FIELD_CONFIG.copy(),
             "detection_config": detection_config,
