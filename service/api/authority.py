@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -20,6 +21,9 @@ from service.api.artifacts import get_artifact_loader
 from service.api.key_store import get_key_store
 
 logger = logging.getLogger(__name__)
+
+# Environment variable for YAML config path
+WATERMARK_CONFIG_PATH_ENV = "WATERMARK_CONFIG_PATH"
 
 # Module-level cache for likelihood params (loaded once at runtime)
 _ARTIFACT_LOADER = None
@@ -111,8 +115,6 @@ class Authority:
     """
     
     # Default embedding configuration (seed-bias watermarking)
-    # CRITICAL: This MUST match the config used to train the likelihood model
-    # Source: /app/experiments/baseline_bandpass_mid_continuous.yaml
     DEFAULT_EMBEDDING_CONFIG = {
         "lambda_strength": 0.075,
         "domain": "frequency",
@@ -127,10 +129,8 @@ class Authority:
         "prior_watermarked": 0.5,
     }
     
-    # Default G-field configuration
-    # CRITICAL: This MUST match the config used to train the likelihood model
-    # Source: /app/experiments/baseline_bandpass_mid_continuous.yaml
-    DEFAULT_G_FIELD_CONFIG = {
+    # Fallback G-field configuration (used when WATERMARK_CONFIG_PATH is not set)
+    FALLBACK_G_FIELD_CONFIG = {
         "mapping_mode": "continuous",
         "continuous_range": [-0.6, 0.6],
         "domain": "frequency",
@@ -141,11 +141,65 @@ class Authority:
         "normalize_unit_variance": False,
     }
     
+    # Cached g_field_config loaded from YAML (None = not yet attempted)
+    _loaded_g_field_config: Optional[Dict[str, Any]] = None
+    _g_field_config_loaded: bool = False
+    
     # Default inversion configuration
+    # NOTE: guidance_scale MUST be 1.0 for DDIM inversion (unconditional).
+    # DDIMInverter.invert() rejects any other value. The YAML's
+    # diffusion.guidance_scale (7.5) is for generation CFG only.
     DEFAULT_INVERSION_CONFIG = {
         "num_inference_steps": 50,
         "guidance_scale": 1.0,
     }
+    
+    @classmethod
+    def load_g_field_config(cls) -> Dict[str, Any]:
+        """
+        Load g_field_config from the YAML config file specified by the
+        WATERMARK_CONFIG_PATH environment variable.
+        
+        Falls back to FALLBACK_G_FIELD_CONFIG if the env var is not set
+        or loading fails, logging a warning.
+        
+        Returns:
+            Dictionary with g_field configuration parameters.
+        """
+        if cls._g_field_config_loaded:
+            return cls._loaded_g_field_config if cls._loaded_g_field_config is not None else cls.FALLBACK_G_FIELD_CONFIG.copy()
+        
+        cls._g_field_config_loaded = True
+        
+        config_path = os.environ.get(WATERMARK_CONFIG_PATH_ENV)
+        if config_path is None:
+            logger.warning(
+                f"{WATERMARK_CONFIG_PATH_ENV} not set. "
+                f"Using hardcoded FALLBACK_G_FIELD_CONFIG defaults. "
+                f"Set {WATERMARK_CONFIG_PATH_ENV} to the experiment YAML to ensure "
+                f"train-detect parity."
+            )
+            return cls.FALLBACK_G_FIELD_CONFIG.copy()
+        
+        try:
+            from src.core.config import AppConfig
+            from src.detection.g_values import g_field_config_to_dict
+            
+            app_config = AppConfig.from_yaml(config_path)
+            g_field = app_config.watermark.algorithm_params.g_field
+            loaded = g_field_config_to_dict(g_field)
+            cls._loaded_g_field_config = loaded
+            
+            logger.info(
+                f"Loaded g_field_config from {config_path}: {loaded}"
+            )
+            return loaded
+        except Exception as e:
+            logger.warning(
+                f"Failed to load g_field_config from {config_path}: {e}. "
+                f"Falling back to FALLBACK_G_FIELD_CONFIG defaults."
+            )
+            return cls.FALLBACK_G_FIELD_CONFIG.copy()
     
     def __init__(self):
         """Initialize authority."""
@@ -265,7 +319,7 @@ class Authority:
             "key_id": key_id,
             "master_key": master_key,
             "key_fingerprint": fingerprint,
-            "g_field_config": self.DEFAULT_G_FIELD_CONFIG.copy(),
+            "g_field_config": self.load_g_field_config(),
             "detection_config": detection_config,
             "inversion_config": self.DEFAULT_INVERSION_CONFIG.copy(),
         }

@@ -487,13 +487,16 @@ class GPUPipeline:
         
         # DDIM inversion
         num_steps = inversion_config.get("num_inference_steps", 50)
+        guidance_scale = inversion_config.get("guidance_scale", 1.0)
+        
+        logger.info(f"DDIM inversion: num_steps={num_steps}, guidance_scale={guidance_scale}")
         
         with torch.no_grad():
             z_T = inverter.invert(
                 image=image,
                 num_inference_steps=num_steps,
                 prompt="",
-                guidance_scale=1.0,
+                guidance_scale=guidance_scale,
             )
         
         # z_T is [1, 4, 64, 64]
@@ -530,23 +533,52 @@ class GPUPipeline:
         else:
             g_valid = g
         
-        # Binarize g-values to {0, 1}
-        g_binary = (g_valid > 0).float().unsqueeze(0)  # [1, N_eff]
+        # DIAGNOSTIC: Log g_valid stats after masking, before scoring
+        logger.info(
+            f"g_valid stats (after mask, before scoring): "
+            f"mean={g_valid.mean().item():.4f}, "
+            f"std={g_valid.std().item():.4f}, "
+            f"frac_positive={(g_valid > 0).float().mean().item():.4f}, "
+            f"n_positions={g_valid.shape[0]}"
+        )
+        
+        # Prepare g-values based on mapping_mode
+        # CRITICAL: The Gaussian likelihood model was trained on real-valued
+        # g-values in continuous mode. Binarizing destroys the signal.
+        mapping_mode = g_field_config.get("mapping_mode", "binary")
+        logger.info(f"g_field_config mapping_mode: {mapping_mode}")
+        
+        if mapping_mode == "continuous":
+            # Continuous mode: preserve real-valued g-values (no thresholding)
+            g_input = g_valid.unsqueeze(0)  # [1, N_eff]
+        else:
+            # Binary mode: binarize g-values to {0, 1}
+            g_input = (g_valid > 0).float().unsqueeze(0)  # [1, N_eff]
+        
         mask_valid = mask[mask > 0.5].unsqueeze(0) if mask is not None else None
         
         # Validate mask alignment with detector
-        N_eff = int(g_binary.shape[1])
+        N_eff = int(g_input.shape[1])
         if detector.num_positions is not None and N_eff != detector.num_positions:
             raise ValueError(
-                f"Mask alignment mismatch: g_binary has {N_eff} positions "
+                f"Mask alignment mismatch: g_input has {N_eff} positions "
                 f"but likelihood model expects {detector.num_positions}. "
                 f"This indicates g_field_config mismatch between generation and detection."
             )
         
         logger.info(f"Mask validated: {N_eff} positions")
         
+        # Sanity check for continuous mode: g_input should have many unique values
+        if mapping_mode == "continuous":
+            n_unique = g_input.unique().numel()
+            logger.info(f"Continuous mode: g_input has {n_unique} unique values")
+            assert n_unique > 10, (
+                f"Continuous mode g_input has only {n_unique} unique values "
+                f"(expected many). This suggests an upstream binarization bug."
+            )
+        
         # Run detection using trained BayesianDetector
-        result = detector.score(g_binary, mask_valid)
+        result = detector.score(g_input, mask_valid)
         
         # Extract raw log-odds
         raw_log_odds = result["log_odds"].item()
