@@ -512,6 +512,12 @@ class GPUPipeline:
         
         logger.info(f"G-values shape: {g.shape}")
         
+        # DIAGNOSTIC: Log g-value statistics to verify they differ across images
+        logger.info(
+            f"G-values stats: min={g.min().item():.4f}, max={g.max().item():.4f}, "
+            f"mean={g.mean().item():.4f}, std={g.std().item():.4f}"
+        )
+        
         # Flatten and prepare for detector
         if g.dim() > 1:
             g = g.flatten()
@@ -546,29 +552,41 @@ class GPUPipeline:
         raw_log_odds = result["log_odds"].item()
         posterior = result["posterior"].item()
         
+        # DIAGNOSTIC: Log raw values BEFORE normalization to verify they differ
+        logger.info(f"Raw log-odds (before normalization): {raw_log_odds:.4f}")
+        logger.info(f"Posterior (from detector): {posterior:.4f}")
+        
         # CRITICAL: Apply normalization to raw log-odds
         # normalized_score = (raw_log_odds - mean) / std
         normalized_score = (raw_log_odds - norm_mean) / norm_std
+        
+        # DIAGNOSTIC: Log normalized score
+        logger.info(f"Normalized score: {normalized_score:.4f}")
         
         # CRITICAL: Use calibrated threshold for detection decision
         # Detection: normalized_score > calibrated_threshold
         detected = normalized_score > calibrated_threshold
         
-        # Compute confidence based on distance from threshold
-        # Higher normalized score = higher confidence in watermarked
-        # Lower normalized score = higher confidence in clean
-        if detected:
-            # Watermarked: confidence increases with score above threshold
-            confidence = min(0.99, 0.5 + 0.1 * (normalized_score - calibrated_threshold))
-        else:
-            # Clean: confidence increases with score below threshold
-            confidence = min(0.99, 0.5 + 0.1 * (calibrated_threshold - normalized_score))
+        # CRITICAL FIX: Compute confidence using sigmoid for proper probability scaling
+        # The previous formula (0.5 + 0.1 * distance) always hit the 0.99 ceiling
+        # for any score significantly different from threshold, causing constant confidence.
+        #
+        # New approach: Use sigmoid of normalized score to map to [0, 1] probability
+        # This ensures different scores produce different confidence values.
+        import torch
+        confidence_raw = torch.sigmoid(torch.tensor(normalized_score)).item()
         
+        # Clip to [0.01, 0.99] to avoid extreme values
+        confidence = max(0.01, min(0.99, confidence_raw))
+        
+        # DIAGNOSTIC: Log complete detection result
         logger.info(
             f"Detection result: raw_log_odds={raw_log_odds:.4f}, "
             f"normalized_score={normalized_score:.4f}, "
             f"threshold={calibrated_threshold:.4f}, "
-            f"detected={detected}"
+            f"detected={detected}, "
+            f"confidence={confidence:.4f}, "
+            f"posterior={posterior:.4f}"
         )
         
         # Get latent shape for result
