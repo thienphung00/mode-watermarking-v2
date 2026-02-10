@@ -274,6 +274,7 @@ async def detect_watermark(
         
         return DetectResponse(
             detected=response.detected,
+            confidence=response.confidence,
             key_id=key_id,
             score=response.score,
             threshold=response.threshold,
