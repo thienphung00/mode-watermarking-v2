@@ -274,13 +274,10 @@ async def detect_watermark(
         
         return DetectResponse(
             detected=response.detected,
-            confidence=response.confidence,
             key_id=key_id,
             score=response.score,
-            threshold=0.5,  # Default threshold
+            threshold=response.threshold,
             processing_time_ms=processing_time_ms,
-            posterior=response.posterior,
-            log_odds=response.log_odds,
         )
         
     except GPUClientConnectionError as e:
