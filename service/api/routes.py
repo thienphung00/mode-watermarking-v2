@@ -16,7 +16,7 @@ import time
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, File, UploadFile, Form
+from fastapi import APIRouter, HTTPException, File, UploadFile, Form, Request
 from fastapi.responses import HTMLResponse, FileResponse
 
 from service.api.schemas import (
@@ -109,7 +109,7 @@ async def list_keys() -> KeyListResponse:
         503: {"model": ErrorResponse, "description": "GPU worker unavailable"},
     },
 )
-async def generate_image(request: GenerateRequest) -> GenerateResponse:
+async def generate_image(request: Request, body: GenerateRequest) -> GenerateResponse:
     """
     Generate a watermarked image using the specified key.
     
@@ -124,13 +124,13 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
     
     # Validate key
     authority = get_authority()
-    if not authority.validate_key(request.key_id):
-        raise HTTPException(status_code=400, detail=f"Invalid or inactive key: {request.key_id}")
+    if not authority.validate_key(body.key_id):
+        raise HTTPException(status_code=400, detail=f"Invalid or inactive key: {body.key_id}")
     
     # Get generation payload (master_key only)
     try:
         payload = authority.get_generation_payload(
-            key_id=request.key_id,
+            key_id=body.key_id,
             request_id=request_id,
         )
     except ValueError as e:
@@ -143,16 +143,16 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
     try:
         # Call GPU worker with master_key (not derived_key)
         response = await gpu_client.generate(
-            key_id=request.key_id,
+            key_id=body.key_id,
             master_key=payload["master_key"],
             key_fingerprint=payload["key_fingerprint"],
-            prompt=request.prompt,
+            prompt=body.prompt,
             request_id=request_id,
-            seed=request.seed,
-            num_inference_steps=request.num_inference_steps,
-            guidance_scale=request.guidance_scale,
-            width=request.width,
-            height=request.height,
+            seed=body.seed,
+            num_inference_steps=body.num_inference_steps,
+            guidance_scale=body.guidance_scale,
+            width=body.width,
+            height=body.height,
             embedding_config=payload["embedding_config"],
         )
         
@@ -162,14 +162,15 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
         
         processing_time_ms = (time.time() - start_time) * 1000
         
-        # Construct browser-accessible URL
-        image_url = f"/images/{filename}"
+        # Absolute URL so the image displays correctly (same- or cross-origin)
+        base = str(request.base_url).rstrip("/")
+        image_url = f"{base}/images/{filename}"
         
         # Persist generation record (non-blocking, failure-tolerant)
         try:
             generation_store = get_generation_store()
             generation_store.record_generation(
-                key_id=request.key_id,
+                key_id=body.key_id,
                 filename=filename,
                 seed_used=response.seed_used,
                 processing_time_ms=processing_time_ms,
@@ -179,7 +180,7 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
         
         return GenerateResponse(
             image_url=image_url,
-            key_id=request.key_id,
+            key_id=body.key_id,
             seed_used=response.seed_used,
             processing_time_ms=processing_time_ms,
         )
