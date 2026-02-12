@@ -163,13 +163,15 @@ class GCSStorage(StorageBackend):
     """
     Google Cloud Storage backend (stub).
     
-    This is a placeholder for GCS integration.
+    Writes images to local storage_path so they can be served at /images/<filename>.
+    Returns filename only for URL construction; full GCS upload is stubbed.
     """
     
     def __init__(
         self,
         bucket: str,
         prefix: str = "watermark-images/",
+        local_path: Optional[str] = None,
     ):
         """
         Initialize GCS storage.
@@ -177,10 +179,20 @@ class GCSStorage(StorageBackend):
         Args:
             bucket: GCS bucket name
             prefix: Object prefix/folder
+            local_path: Local directory to write images so API can serve at /images/
         """
         self.bucket = bucket
         self.prefix = prefix
+        self.local_path = Path(local_path) if local_path else None
+        if self.local_path:
+            self.local_path.mkdir(parents=True, exist_ok=True)
         logger.warning("GCSStorage is a stub - using mock implementation")
+    
+    def _generate_filename(self, extension: str = "png") -> str:
+        """Generate unique filename."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = uuid.uuid4().hex[:8]
+        return f"img_{timestamp}_{unique_id}.{extension}"
     
     async def save_image(
         self,
@@ -188,17 +200,25 @@ class GCSStorage(StorageBackend):
         filename: Optional[str] = None,
         content_type: str = "image/png",
     ) -> str:
-        """Save image to GCS (stub - returns mock URL)."""
+        """Save image locally (so /images/ can serve it) and return filename only."""
         if filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            unique_id = uuid.uuid4().hex[:8]
             ext = content_type.split("/")[-1]
-            filename = f"img_{timestamp}_{unique_id}.{ext}"
+            filename = self._generate_filename(ext)
+        # Ensure we return only the basename for URL construction
+        filename = os.path.basename(filename)
         
-        # Mock URL
-        url = f"gs://{self.bucket}/{self.prefix}{filename}"
-        logger.info(f"[STUB] Would save image to {url}")
-        return url
+        if self.local_path:
+            filepath = self.local_path / filename
+            try:
+                with open(filepath, "wb") as f:
+                    f.write(image_data)
+                logger.info(f"Saved image to {filepath} (GCS stub)")
+            except Exception as e:
+                logger.error(f"Failed to save image locally: {e}")
+                raise
+        # Stub: would upload to gs://bucket/prefix/filename
+        logger.info(f"[STUB] Would save to gs://{self.bucket}/{self.prefix}{filename}")
+        return filename
     
     async def get_image(self, path: str) -> Optional[bytes]:
         """Retrieve image from GCS (stub)."""
@@ -223,6 +243,9 @@ def get_storage() -> StorageBackend:
     config = get_config()
     
     if config.storage_backend == "gcs" and config.gcs_bucket:
-        return GCSStorage(bucket=config.gcs_bucket)
+        return GCSStorage(
+            bucket=config.gcs_bucket,
+            local_path=config.storage_path,
+        )
     else:
         return LocalStorage(base_path=config.storage_path)

@@ -58,6 +58,10 @@ RUN pip3 install --no-cache-dir \
 COPY src/ /app/src/
 COPY service/gpu/ /app/service/gpu/
 
+# Copy detection artifacts (from service/docker/artifacts/ in repo)
+RUN mkdir -p /app/data/artifacts
+COPY service/docker/artifacts/*.json /app/data/artifacts/
+
 # Set Python path
 ENV PYTHONPATH=/app
 

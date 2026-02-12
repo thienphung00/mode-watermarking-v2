@@ -1,0 +1,20 @@
+{
+  "family_098": {
+    "target_fpr": 0.01,
+    "deployment_threshold": 3.046509615971961,
+    "per_transform_threshold": {
+      "identity": 1.9069325603902543,
+      "jpeg_90": 2.3836325082909777,
+      "jpeg_75": 2.497663874993674,
+      "resize_256": 3.046509615971961,
+      "gaussian_blur_1": 2.2769864053851725
+    },
+    "per_transform_achieved_fpr": {
+      "identity": 0.01,
+      "jpeg_90": 0.01,
+      "jpeg_75": 0.01,
+      "resize_256": 0.01,
+      "gaussian_blur_1": 0.01
+    }
+  }
+}
