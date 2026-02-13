@@ -15,16 +15,16 @@ services:
       - GCS_BUCKET=mode-watermarking-artifacts-098
 
       # Artifact file names (NOT full paths)
-      - LIKELIHOOD_PARAMS_PATH=likelihood_params.json
-      - NORMALIZATION_PARAMS_PATH=normalization_098.json
-      - CALIBRATION_PARAMS_PATH=calibration_098_001.json
+      - LIKELIHOOD_PARAMS_PATH=likelihood_params_exp.json
+      - NORMALIZATION_PARAMS_PATH=normalization_098_exp.json
+      - CALIBRATION_PARAMS_PATH=calibration_098_exp.json
 
       - KEY_STORE_PATH=/app/data/keys.json
       - API_DEBUG=false
 
     volumes:
       - ./data:/app/data
-      - ../results:/app/data/artifacts
+      - ./results:/app/data/artifacts
 
     depends_on:
       gpu:
@@ -53,7 +53,8 @@ services:
 
     volumes:
       - ./data:/app/data
-      - ../results:/app/data/artifacts
+      - ./results:/app/data/artifacts
+
 
     deploy:
       resources:

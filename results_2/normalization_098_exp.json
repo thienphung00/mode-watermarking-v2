@@ -1,0 +1,8 @@
+{
+  "family_098": {
+    "mean": -57845.38671875,
+    "std": 20202.958740234375,
+    "n_clean": 1000,
+    "normalization_method": "robust_median_mad"
+  }
+}
